@@ -85,11 +85,11 @@ git clone https://github.com/yury-opolev/memory-mcp.git
 cd memory-mcp
 
 # Install dependencies, build, and pull the embedding model
-chmod +x setup.sh run.sh
-./setup.sh
+chmod +x scripts/setup.sh scripts/run.sh
+./scripts/setup.sh
 
 # Start the server
-./run.sh
+./scripts/run.sh
 ```
 
 **Windows (PowerShell):**
@@ -99,10 +99,10 @@ git clone https://github.com/yury-opolev/memory-mcp.git
 cd memory-mcp
 
 # Install dependencies, build, and pull the embedding model
-.\setup.ps1
+.\scripts\setup.ps1
 
 # Start the server
-.\run.ps1
+.\scripts\run.ps1
 ```
 
 The setup script will:
@@ -343,8 +343,10 @@ The integration tests skip automatically if Ollama is not available. They cover 
 memory-mcp/
   Directory.Build.props              .NET 10, nullable, implicit usings
   MemoryMcp.slnx                     Solution file
-  setup.sh / setup.ps1               Setup scripts (restore, build, pull model)
-  run.sh / run.ps1                   Run scripts (build + start server)
+
+  scripts/
+    setup.sh / setup.ps1             Setup scripts (restore, build, pull model)
+    run.sh / run.ps1                 Run scripts (build + start server)
 
   src/
     MemoryMcp.Core/                  Core library (no MCP dependency)
