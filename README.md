@@ -74,6 +74,45 @@ This downloads the Qwen3 embedding model (~0.6B parameters, ~500 MB). It produce
 
 ## Getting Started
 
+### Quick Start (Helper Scripts)
+
+Helper scripts automate setup and running for both Linux/macOS and Windows.
+
+**Linux / macOS:**
+
+```sh
+git clone https://github.com/yury-opolev/memory-mcp.git
+cd memory-mcp
+
+# Install dependencies, build, and pull the embedding model
+chmod +x setup.sh run.sh
+./setup.sh
+
+# Start the server
+./run.sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/yury-opolev/memory-mcp.git
+cd memory-mcp
+
+# Install dependencies, build, and pull the embedding model
+.\setup.ps1
+
+# Start the server
+.\run.ps1
+```
+
+The setup script will:
+1. Verify the .NET SDK is installed
+2. Restore NuGet packages and build the solution
+3. Check if Ollama is installed and running
+4. Pull the default embedding model (`qwen3-embedding:0.6b`)
+
+### Manual Setup
+
 ```sh
 # Clone and build
 git clone https://github.com/yury-opolev/memory-mcp.git
@@ -87,6 +126,10 @@ ollama pull qwen3-embedding:0.6b
 # Run the server (stdio transport)
 dotnet run --project src/MemoryMcp
 ```
+
+### Startup Health Check
+
+On startup, the server checks whether Ollama is reachable and whether the configured embedding model is available. If either check fails, the server logs a warning but **does not crash** -- it starts normally so that non-embedding tools (`get_memory`, `delete_memory`) remain available. Embedding-dependent tools (`ingest_memory`, `update_memory`, `search_memory`) return a clear error message if Ollama is unavailable at call time.
 
 The server communicates over stdin/stdout using the MCP protocol. It is designed to be launched as a subprocess by an MCP client (e.g. an AI coding assistant).
 
@@ -300,6 +343,8 @@ The integration tests skip automatically if Ollama is not available. They cover 
 memory-mcp/
   Directory.Build.props              .NET 10, nullable, implicit usings
   MemoryMcp.slnx                     Solution file
+  setup.sh / setup.ps1               Setup scripts (restore, build, pull model)
+  run.sh / run.ps1                   Run scripts (build + start server)
 
   src/
     MemoryMcp.Core/                  Core library (no MCP dependency)

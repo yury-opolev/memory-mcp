@@ -13,8 +13,8 @@ namespace MemoryMcp.Core.IntegrationTests;
 [Trait("Category", "Integration")]
 public class EmbeddingQualityTests : IDisposable
 {
-    private readonly OllamaEmbeddingService? _embeddingService;
-    private readonly bool _ollamaAvailable;
+    private readonly OllamaEmbeddingService? embeddingService;
+    private readonly bool ollamaAvailable;
 
     public EmbeddingQualityTests()
     {
@@ -22,21 +22,23 @@ public class EmbeddingQualityTests : IDisposable
 
         try
         {
-            _embeddingService = new OllamaEmbeddingService(options, NullLogger<OllamaEmbeddingService>.Instance);
+            this.embeddingService = new OllamaEmbeddingService(options, NullLogger<OllamaEmbeddingService>.Instance);
             // Quick connectivity check
-            _embeddingService.EmbedAsync("test").GetAwaiter().GetResult();
-            _ollamaAvailable = true;
+            this.embeddingService.EmbedAsync("test").GetAwaiter().GetResult();
+            this.ollamaAvailable = true;
         }
         catch
         {
-            _ollamaAvailable = false;
+            this.ollamaAvailable = false;
         }
     }
 
     private void SkipIfNoOllama()
     {
-        if (!_ollamaAvailable)
+        if (!this.ollamaAvailable)
+        {
             Assert.Skip("Ollama is not available. Install Ollama and pull the embedding model to run integration tests.");
+        }
     }
 
     private static float CosineSimilarity(float[] a, float[] b)
@@ -54,9 +56,9 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task SimilarTexts_HaveHighCosineSimilarity()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var embeddings = await _embeddingService!.EmbedBatchAsync([
+        var embeddings = await this.embeddingService!.EmbedBatchAsync([
             "The cat sat on the mat.",
             "A cat was sitting on a mat.",
         ]);
@@ -70,9 +72,9 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task DissimilarTexts_HaveLowCosineSimilarity()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var embeddings = await _embeddingService!.EmbedBatchAsync([
+        var embeddings = await this.embeddingService!.EmbedBatchAsync([
             "The stock market crashed today with major losses in technology sectors.",
             "I made a delicious chocolate cake for my daughter's birthday party.",
         ]);
@@ -86,9 +88,9 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task SameMeaning_DifferentPhrasing_HighSimilarity()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var embeddings = await _embeddingService!.EmbedBatchAsync([
+        var embeddings = await this.embeddingService!.EmbedBatchAsync([
             "How do I fix a null reference exception in C#?",
             "Resolving NullReferenceException errors in dotnet applications",
         ]);
@@ -102,9 +104,9 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task SimilarTexts_MoreSimilarThan_DissimilarTexts()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var embeddings = await _embeddingService!.EmbedBatchAsync([
+        var embeddings = await this.embeddingService!.EmbedBatchAsync([
             "Python is a popular programming language for machine learning.",  // A
             "Machine learning frameworks in Python include TensorFlow and PyTorch.",  // B (similar to A)
             "The recipe calls for two cups of flour and one egg.",  // C (dissimilar)
@@ -120,10 +122,10 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task IdenticalTexts_HaveMaxSimilarity()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         var text = "The quick brown fox jumps over the lazy dog.";
-        var embeddings = await _embeddingService!.EmbedBatchAsync([text, text]);
+        var embeddings = await this.embeddingService!.EmbedBatchAsync([text, text]);
 
         var similarity = CosineSimilarity(embeddings[0], embeddings[1]);
 
@@ -134,9 +136,9 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task EmbeddingVector_HasExpectedDimensions()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var embedding = await _embeddingService!.EmbedAsync("Test text");
+        var embedding = await this.embeddingService!.EmbedAsync("Test text");
 
         // Default model produces 1024-dimensional vectors
         Assert.Equal(1024, embedding.Length);
@@ -145,9 +147,9 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task EmbeddingVector_IsNormalized()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var embedding = await _embeddingService!.EmbedAsync("Test text for normalization check");
+        var embedding = await this.embeddingService!.EmbedAsync("Test text for normalization check");
 
         // Compute L2 norm
         float norm = MathF.Sqrt(embedding.Sum(x => x * x));
@@ -160,17 +162,17 @@ public class EmbeddingQualityTests : IDisposable
     [Fact]
     public async Task BatchEmbedding_ProducesConsistentResults()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         var texts = new[] { "First sentence.", "Second sentence.", "Third sentence." };
 
         // Embed as batch
-        var batchResults = await _embeddingService!.EmbedBatchAsync(texts);
+        var batchResults = await this.embeddingService!.EmbedBatchAsync(texts);
 
         // Embed individually
-        var individual1 = await _embeddingService.EmbedAsync(texts[0]);
-        var individual2 = await _embeddingService.EmbedAsync(texts[1]);
-        var individual3 = await _embeddingService.EmbedAsync(texts[2]);
+        var individual1 = await this.embeddingService.EmbedAsync(texts[0]);
+        var individual2 = await this.embeddingService.EmbedAsync(texts[1]);
+        var individual3 = await this.embeddingService.EmbedAsync(texts[2]);
 
         // Batch and individual results should be very similar (> 0.99)
         Assert.True(CosineSimilarity(batchResults[0], individual1) > 0.99f);
@@ -180,6 +182,6 @@ public class EmbeddingQualityTests : IDisposable
 
     public void Dispose()
     {
-        _embeddingService?.Dispose();
+        this.embeddingService?.Dispose();
     }
 }

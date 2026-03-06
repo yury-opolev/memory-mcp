@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
 
@@ -15,13 +16,15 @@ namespace MemoryMcp.Tools;
 [McpServerToolType]
 public class MemoryTools
 {
-    private readonly IMemoryService _memoryService;
-    private readonly MemoryMcpOptions _options;
+    private readonly IMemoryService memoryService;
+    private readonly MemoryMcpOptions options;
+    private readonly ILogger<MemoryTools> logger;
 
-    public MemoryTools(IMemoryService memoryService, IOptions<MemoryMcpOptions> options)
+    public MemoryTools(IMemoryService memoryService, IOptions<MemoryMcpOptions> options, ILogger<MemoryTools> logger)
     {
-        _memoryService = memoryService;
-        _options = options.Value;
+        this.memoryService = memoryService;
+        this.options = options.Value;
+        this.logger = logger;
     }
 
     [McpServerTool(Name = "ingest_memory")]
@@ -32,9 +35,17 @@ public class MemoryTools
         [Description("Optional tags for categorization, as a JSON array of strings (e.g. [\"project\",\"notes\"]).")] string? tags = null,
         CancellationToken cancellationToken = default)
     {
-        var tagList = ParseTags(tags);
-        var memoryId = await _memoryService.IngestAsync(content, title, tagList, cancellationToken);
-        return $"Memory stored successfully. ID: {memoryId}";
+        try
+        {
+            var tagList = ParseTags(tags);
+            var memoryId = await this.memoryService.IngestAsync(content, title, tagList, cancellationToken);
+            return $"Memory stored successfully. ID: {memoryId}";
+        }
+        catch (InvalidOperationException ex) when (ex.InnerException is HttpRequestException or not null)
+        {
+            this.logger.LogError(ex, "Ollama error during ingest_memory.");
+            return $"Error: {ex.Message}";
+        }
     }
 
     [McpServerTool(Name = "get_memory")]
@@ -43,9 +54,11 @@ public class MemoryTools
         [Description("The memory ID (GUID) to retrieve.")] string id,
         CancellationToken cancellationToken = default)
     {
-        var result = await _memoryService.GetAsync(id, cancellationToken);
+        var result = await this.memoryService.GetAsync(id, cancellationToken);
         if (result is null)
+        {
             return $"Memory not found: {id}";
+        }
 
         return FormatMemoryResult(result);
     }
@@ -60,14 +73,26 @@ public class MemoryTools
         CancellationToken cancellationToken = default)
     {
         if (content is null && title is null && tags is null)
+        {
             return "No updates provided. Specify at least one of: content, title, or tags.";
+        }
 
-        var tagList = ParseTags(tags);
-        var result = await _memoryService.UpdateAsync(id, content, title, tagList, cancellationToken);
-        if (result is null)
-            return $"Memory not found: {id}";
+        try
+        {
+            var tagList = ParseTags(tags);
+            var result = await this.memoryService.UpdateAsync(id, content, title, tagList, cancellationToken);
+            if (result is null)
+            {
+                return $"Memory not found: {id}";
+            }
 
-        return $"Memory updated successfully.\n\n{FormatMemoryResult(result)}";
+            return $"Memory updated successfully.\n\n{FormatMemoryResult(result)}";
+        }
+        catch (InvalidOperationException ex) when (ex.InnerException is HttpRequestException or not null)
+        {
+            this.logger.LogError(ex, "Ollama error during update_memory.");
+            return $"Error: {ex.Message}";
+        }
     }
 
     [McpServerTool(Name = "delete_memory")]
@@ -76,7 +101,7 @@ public class MemoryTools
         [Description("The memory ID (GUID) to delete.")] string id,
         CancellationToken cancellationToken = default)
     {
-        var deleted = await _memoryService.DeleteAsync(id, cancellationToken);
+        var deleted = await this.memoryService.DeleteAsync(id, cancellationToken);
         return deleted
             ? $"Memory {id} deleted successfully."
             : $"Memory not found: {id}";
@@ -91,47 +116,63 @@ public class MemoryTools
         [Description("Filter by tags: only return memories with at least one matching tag. JSON array of strings (e.g. [\"project\"]).")] string? tags = null,
         CancellationToken cancellationToken = default)
     {
-        var tagList = ParseTags(tags);
-        var results = await _memoryService.SearchAsync(query, limit, minScore, tagList, cancellationToken);
-
-        if (results.Count == 0)
-            return "No matching memories found.";
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"Found {results.Count} matching memories:\n");
-
-        foreach (var result in results)
+        try
         {
-            sb.AppendLine($"--- Memory: {result.MemoryId} (Score: {result.Score:F4}) ---");
-            if (result.Title is not null)
-                sb.AppendLine($"Title: {result.Title}");
-            if (result.Tags.Count > 0)
-                sb.AppendLine($"Tags: {string.Join(", ", result.Tags)}");
-            sb.AppendLine($"Created: {result.CreatedAt:u} | Updated: {result.UpdatedAt:u}");
+            var tagList = ParseTags(tags);
+            var results = await this.memoryService.SearchAsync(query, limit, minScore, tagList, cancellationToken);
 
-            // Truncate content if needed
-            var content = result.Content;
-            if (content.Length > _options.SearchMaxContentLength)
+            if (results.Count == 0)
             {
-                content = content[.._options.SearchMaxContentLength];
-                sb.AppendLine(content);
-                sb.AppendLine($"[truncated] Use get_memory with id \"{result.MemoryId}\" to read full content.");
-            }
-            else
-            {
-                sb.AppendLine(content);
+                return "No matching memories found.";
             }
 
-            sb.AppendLine();
+            var sb = new StringBuilder();
+            sb.AppendLine($"Found {results.Count} matching memories:\n");
+
+            foreach (var result in results)
+            {
+                sb.AppendLine($"--- Memory: {result.MemoryId} (Score: {result.Score:F4}) ---");
+                if (result.Title is not null)
+                {
+                    sb.AppendLine($"Title: {result.Title}");
+                }
+                if (result.Tags.Count > 0)
+                {
+                    sb.AppendLine($"Tags: {string.Join(", ", result.Tags)}");
+                }
+                sb.AppendLine($"Created: {result.CreatedAt:u} | Updated: {result.UpdatedAt:u}");
+
+                // Truncate content if needed
+                var resultContent = result.Content;
+                if (resultContent.Length > this.options.SearchMaxContentLength)
+                {
+                    resultContent = resultContent[..this.options.SearchMaxContentLength];
+                    sb.AppendLine(resultContent);
+                    sb.AppendLine($"[truncated] Use get_memory with id \"{result.MemoryId}\" to read full content.");
+                }
+                else
+                {
+                    sb.AppendLine(resultContent);
+                }
+
+                sb.AppendLine();
+            }
+
+            return sb.ToString();
         }
-
-        return sb.ToString();
+        catch (InvalidOperationException ex) when (ex.InnerException is HttpRequestException or not null)
+        {
+            this.logger.LogError(ex, "Ollama error during search_memory.");
+            return $"Error: {ex.Message}";
+        }
     }
 
     private static List<string>? ParseTags(string? tagsJson)
     {
         if (string.IsNullOrWhiteSpace(tagsJson))
+        {
             return null;
+        }
 
         try
         {
@@ -149,9 +190,13 @@ public class MemoryTools
         var sb = new StringBuilder();
         sb.AppendLine($"ID: {result.MemoryId}");
         if (result.Title is not null)
+        {
             sb.AppendLine($"Title: {result.Title}");
+        }
         if (result.Tags.Count > 0)
+        {
             sb.AppendLine($"Tags: {string.Join(", ", result.Tags)}");
+        }
         sb.AppendLine($"Created: {result.CreatedAt:u}");
         sb.AppendLine($"Updated: {result.UpdatedAt:u}");
         sb.AppendLine($"Content:\n{result.Content}");

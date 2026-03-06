@@ -15,32 +15,38 @@ namespace MemoryMcp.Core.Tests.Storage;
 /// </summary>
 public class SqliteVecMemoryStoreTests : IDisposable
 {
-    private readonly string _tempDir;
-    private readonly SqliteVecMemoryStore _store;
+    private readonly string tempDir;
+    private readonly SqliteVecMemoryStore store;
 
     public SqliteVecMemoryStoreTests()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), $"memorymcp_test_{Guid.NewGuid():N}");
-        Directory.CreateDirectory(_tempDir);
+        this.tempDir = Path.Combine(Path.GetTempPath(), $"memorymcp_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(this.tempDir);
 
         var options = Options.Create(new MemoryMcpOptions
         {
-            DataDirectory = _tempDir,
+            DataDirectory = this.tempDir,
             MemoriesSubdirectory = "memories",
             DatabaseFileName = "test.db",
             Ollama = new OllamaOptions { Dimensions = 4 }, // Small dims for testing
         });
         var logger = Substitute.For<ILogger<SqliteVecMemoryStore>>();
-        _store = new SqliteVecMemoryStore(options, logger);
+        this.store = new SqliteVecMemoryStore(options, logger);
     }
 
     public void Dispose()
     {
-        _store.Dispose();
-        if (Directory.Exists(_tempDir))
+        this.store.Dispose();
+        if (Directory.Exists(this.tempDir))
         {
-            try { Directory.Delete(_tempDir, recursive: true); }
-            catch { /* best effort cleanup */ }
+            try
+            {
+                Directory.Delete(this.tempDir, recursive: true);
+            }
+            catch
+            {
+                /* best effort cleanup */
+            }
         }
         GC.SuppressFinalize(this);
     }
@@ -50,7 +56,9 @@ public class SqliteVecMemoryStoreTests : IDisposable
         var rng = Random.Shared;
         var vec = new float[dims];
         for (int i = 0; i < dims; i++)
+        {
             vec[i] = (float)rng.NextDouble();
+        }
         return vec;
     }
 
@@ -83,24 +91,24 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task InitializeAsync_CreatesSchemaAndDirectories()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
-        Assert.True(Directory.Exists(Path.Combine(_tempDir, "memories")));
-        Assert.True(File.Exists(Path.Combine(_tempDir, "test.db")));
+        Assert.True(Directory.Exists(Path.Combine(this.tempDir, "memories")));
+        Assert.True(File.Exists(Path.Combine(this.tempDir, "test.db")));
     }
 
     [Fact]
     public async Task StoreAndGetMemory_RoundTrips()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var content = "This is test content for round-trip verification.";
         var (chunks, vectors) = CreateTestChunks(memoryId, title: "Test Title", tags: ["tag1", "tag2"]);
 
-        await _store.StoreMemoryAsync(memoryId, content, chunks, vectors);
+        await this.store.StoreMemoryAsync(memoryId, content, chunks, vectors);
 
-        var result = await _store.GetMemoryAsync(memoryId);
+        var result = await this.store.GetMemoryAsync(memoryId);
 
         Assert.NotNull(result);
         Assert.Equal(memoryId, result.MemoryId);
@@ -113,68 +121,68 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task GetMemoryAsync_NotFound_ReturnsNull()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
-        var result = await _store.GetMemoryAsync("nonexistent");
+        var result = await this.store.GetMemoryAsync("nonexistent");
         Assert.Null(result);
     }
 
     [Fact]
     public async Task ExistsAsync_ReturnsTrueForExisting()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var (chunks, vectors) = CreateTestChunks(memoryId);
-        await _store.StoreMemoryAsync(memoryId, "content", chunks, vectors);
+        await this.store.StoreMemoryAsync(memoryId, "content", chunks, vectors);
 
-        Assert.True(await _store.ExistsAsync(memoryId));
+        Assert.True(await this.store.ExistsAsync(memoryId));
     }
 
     [Fact]
     public async Task ExistsAsync_ReturnsFalseForNonExisting()
     {
-        await _store.InitializeAsync();
-        Assert.False(await _store.ExistsAsync("nonexistent"));
+        await this.store.InitializeAsync();
+        Assert.False(await this.store.ExistsAsync("nonexistent"));
     }
 
     [Fact]
     public async Task DeleteMemoryAsync_RemovesChunksAndFile()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var (chunks, vectors) = CreateTestChunks(memoryId);
-        await _store.StoreMemoryAsync(memoryId, "to be deleted", chunks, vectors);
+        await this.store.StoreMemoryAsync(memoryId, "to be deleted", chunks, vectors);
 
-        Assert.True(await _store.ExistsAsync(memoryId));
+        Assert.True(await this.store.ExistsAsync(memoryId));
 
-        var deleted = await _store.DeleteMemoryAsync(memoryId);
+        var deleted = await this.store.DeleteMemoryAsync(memoryId);
 
         Assert.True(deleted);
-        Assert.False(await _store.ExistsAsync(memoryId));
-        Assert.Null(await _store.GetMemoryAsync(memoryId));
+        Assert.False(await this.store.ExistsAsync(memoryId));
+        Assert.Null(await this.store.GetMemoryAsync(memoryId));
     }
 
     [Fact]
     public async Task DeleteMemoryAsync_NotFound_ReturnsFalse()
     {
-        await _store.InitializeAsync();
-        Assert.False(await _store.DeleteMemoryAsync("nonexistent"));
+        await this.store.InitializeAsync();
+        Assert.False(await this.store.DeleteMemoryAsync("nonexistent"));
     }
 
     [Fact]
     public async Task UpdateMetadataAsync_UpdatesTitleAndTags()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var (chunks, vectors) = CreateTestChunks(memoryId, title: "Old Title", tags: ["old"]);
-        await _store.StoreMemoryAsync(memoryId, "content", chunks, vectors);
+        await this.store.StoreMemoryAsync(memoryId, "content", chunks, vectors);
 
-        await _store.UpdateMetadataAsync(memoryId, "New Title", ["new1", "new2"], DateTimeOffset.UtcNow);
+        await this.store.UpdateMetadataAsync(memoryId, "New Title", ["new1", "new2"], DateTimeOffset.UtcNow);
 
-        var result = await _store.GetMemoryAsync(memoryId);
+        var result = await this.store.GetMemoryAsync(memoryId);
         Assert.NotNull(result);
         Assert.Equal("New Title", result.Title);
         Assert.Contains("new1", result.Tags);
@@ -185,15 +193,15 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task UpdateMetadataAsync_TitleOnly_PreservesTags()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var (chunks, vectors) = CreateTestChunks(memoryId, title: "Old Title", tags: ["keep"]);
-        await _store.StoreMemoryAsync(memoryId, "content", chunks, vectors);
+        await this.store.StoreMemoryAsync(memoryId, "content", chunks, vectors);
 
-        await _store.UpdateMetadataAsync(memoryId, "New Title", null, DateTimeOffset.UtcNow);
+        await this.store.UpdateMetadataAsync(memoryId, "New Title", null, DateTimeOffset.UtcNow);
 
-        var result = await _store.GetMemoryAsync(memoryId);
+        var result = await this.store.GetMemoryAsync(memoryId);
         Assert.NotNull(result);
         Assert.Equal("New Title", result.Title);
         Assert.Contains("keep", result.Tags);
@@ -202,14 +210,14 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task StoreMemoryAsync_MultipleChunks_StoresAll()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var (chunks, vectors) = CreateTestChunks(memoryId, title: "Multi", count: 3);
-        await _store.StoreMemoryAsync(memoryId, "long content here", chunks, vectors);
+        await this.store.StoreMemoryAsync(memoryId, "long content here", chunks, vectors);
 
-        Assert.True(await _store.ExistsAsync(memoryId));
-        var result = await _store.GetMemoryAsync(memoryId);
+        Assert.True(await this.store.ExistsAsync(memoryId));
+        var result = await this.store.GetMemoryAsync(memoryId);
         Assert.NotNull(result);
         Assert.Equal("Multi", result.Title);
     }
@@ -217,7 +225,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task SearchAsync_FindsSimilarVectors()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         // Store a memory with a known vector
         var memoryId = Guid.NewGuid().ToString();
@@ -232,7 +240,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
                 CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
             }
         };
-        await _store.StoreMemoryAsync(memoryId, "target", chunks, [targetVector]);
+        await this.store.StoreMemoryAsync(memoryId, "target", chunks, [targetVector]);
 
         // Store another memory with an orthogonal vector
         var otherId = Guid.NewGuid().ToString();
@@ -247,11 +255,11 @@ public class SqliteVecMemoryStoreTests : IDisposable
                 CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
             }
         };
-        await _store.StoreMemoryAsync(otherId, "other", otherChunks, [otherVector]);
+        await this.store.StoreMemoryAsync(otherId, "other", otherChunks, [otherVector]);
 
         // Search with a vector similar to target
         var queryVector = new float[] { 0.9f, 0.1f, 0.0f, 0.0f };
-        var results = await _store.SearchAsync(queryVector, limit: 2);
+        var results = await this.store.SearchAsync(queryVector, limit: 2);
 
         Assert.Equal(2, results.Count);
         // The target should be the first result (most similar)
@@ -263,7 +271,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task SearchAsync_WithTagFilter_FiltersResults()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         // Store memory with tag "project"
         var id1 = Guid.NewGuid().ToString();
@@ -278,7 +286,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
                 CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
             }
         };
-        await _store.StoreMemoryAsync(id1, "tagged content", chunks1, [vec]);
+        await this.store.StoreMemoryAsync(id1, "tagged content", chunks1, [vec]);
 
         // Store memory without tag
         var id2 = Guid.NewGuid().ToString();
@@ -293,10 +301,10 @@ public class SqliteVecMemoryStoreTests : IDisposable
                 CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
             }
         };
-        await _store.StoreMemoryAsync(id2, "untagged content", chunks2, [vec2]);
+        await this.store.StoreMemoryAsync(id2, "untagged content", chunks2, [vec2]);
 
         // Search with tag filter
-        var results = await _store.SearchAsync(vec, limit: 10, tags: ["project"]);
+        var results = await this.store.SearchAsync(vec, limit: 10, tags: ["project"]);
 
         Assert.Single(results);
         Assert.Equal(id1, results[0].MemoryId);
@@ -305,7 +313,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task SearchAsync_WithMinScore_FiltersLowScores()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         // Store memory
         var id1 = Guid.NewGuid().ToString();
@@ -320,11 +328,11 @@ public class SqliteVecMemoryStoreTests : IDisposable
                 CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
             }
         };
-        await _store.StoreMemoryAsync(id1, "similar", chunks1, [vec1]);
+        await this.store.StoreMemoryAsync(id1, "similar", chunks1, [vec1]);
 
         // Search with high min score using an orthogonal vector (should get filtered)
         var queryVector = new float[] { 0.0f, 1.0f, 0.0f, 0.0f };
-        var results = await _store.SearchAsync(queryVector, limit: 10, minScore: 0.99f);
+        var results = await this.store.SearchAsync(queryVector, limit: 10, minScore: 0.99f);
 
         // Orthogonal vectors should have low similarity and be filtered
         Assert.Empty(results);
@@ -333,7 +341,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task SearchAsync_MultipleChunksSameMemory_GroupsByMemory()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var vec1 = new float[] { 1.0f, 0.0f, 0.0f, 0.0f };
@@ -355,10 +363,10 @@ public class SqliteVecMemoryStoreTests : IDisposable
                 CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
             },
         };
-        await _store.StoreMemoryAsync(memoryId, "long document content here", chunks, [vec1, vec2]);
+        await this.store.StoreMemoryAsync(memoryId, "long document content here", chunks, [vec1, vec2]);
 
         var queryVector = new float[] { 1.0f, 0.0f, 0.0f, 0.0f };
-        var results = await _store.SearchAsync(queryVector, limit: 10);
+        var results = await this.store.SearchAsync(queryVector, limit: 10);
 
         // Even though there are 2 chunks, should return 1 memory
         Assert.Single(results);
@@ -368,7 +376,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
     [Fact]
     public async Task SearchAsync_LimitRespected()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         // Store 5 memories
         for (int i = 0; i < 5; i++)
@@ -385,23 +393,23 @@ public class SqliteVecMemoryStoreTests : IDisposable
                     CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
                 }
             };
-            await _store.StoreMemoryAsync(id, $"content {i}", chunks, [vec]);
+            await this.store.StoreMemoryAsync(id, $"content {i}", chunks, [vec]);
         }
 
-        var results = await _store.SearchAsync(RandomVector(), limit: 3);
+        var results = await this.store.SearchAsync(RandomVector(), limit: 3);
         Assert.True(results.Count <= 3);
     }
 
     [Fact]
     public async Task StoreMemoryAsync_MismatchedCountsThrows()
     {
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
         var memoryId = Guid.NewGuid().ToString();
         var (chunks, _) = CreateTestChunks(memoryId, count: 2);
         var vectors = new List<float[]> { RandomVector() }; // Only 1 vector for 2 chunks
 
         await Assert.ThrowsAsync<ArgumentException>(
-            () => _store.StoreMemoryAsync(memoryId, "content", chunks, vectors));
+            () => this.store.StoreMemoryAsync(memoryId, "content", chunks, vectors));
     }
 }

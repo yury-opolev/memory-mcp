@@ -14,23 +14,23 @@ namespace MemoryMcp.Core.Storage;
 /// </summary>
 public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 {
-    private readonly MemoryMcpOptions _options;
-    private readonly ILogger<SqliteVecMemoryStore> _logger;
-    private readonly SqliteConnection _connection;
-    private bool _disposed;
+    private readonly MemoryMcpOptions options;
+    private readonly ILogger<SqliteVecMemoryStore> logger;
+    private readonly SqliteConnection connection;
+    private bool disposed;
 
     public SqliteVecMemoryStore(IOptions<MemoryMcpOptions> options, ILogger<SqliteVecMemoryStore> logger)
     {
-        _options = options.Value;
-        _logger = logger;
+        this.options = options.Value;
+        this.logger = logger;
 
         var connectionString = new SqliteConnectionStringBuilder
         {
-            DataSource = _options.DatabasePath,
+            DataSource = this.options.DatabasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
         }.ToString();
 
-        _connection = new SqliteConnection(connectionString);
+        this.connection = new SqliteConnection(connectionString);
     }
 
     /// <summary>
@@ -38,25 +38,27 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     /// </summary>
     internal SqliteVecMemoryStore(SqliteConnection connection, MemoryMcpOptions options, ILogger<SqliteVecMemoryStore> logger)
     {
-        _connection = connection;
-        _options = options;
-        _logger = logger;
+        this.connection = connection;
+        this.options = options;
+        this.logger = logger;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         // Ensure directories exist
-        Directory.CreateDirectory(_options.DataDirectory);
-        Directory.CreateDirectory(_options.MemoriesDirectory);
+        Directory.CreateDirectory(this.options.DataDirectory);
+        Directory.CreateDirectory(this.options.MemoriesDirectory);
 
-        if (_connection.State != System.Data.ConnectionState.Open)
-            await _connection.OpenAsync(cancellationToken);
+        if (this.connection.State != System.Data.ConnectionState.Open)
+        {
+            await this.connection.OpenAsync(cancellationToken);
+        }
 
         // Load sqlite-vec extension
-        _connection.LoadExtension("vec0");
+        this.connection.LoadExtension("vec0");
 
         // Create chunks metadata table
-        using var createChunksCmd = _connection.CreateCommand();
+        using var createChunksCmd = this.connection.CreateCommand();
         createChunksCmd.CommandText = """
             CREATE TABLE IF NOT EXISTS chunks (
                 MemoryId    TEXT NOT NULL,
@@ -75,29 +77,31 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         await createChunksCmd.ExecuteNonQueryAsync(cancellationToken);
 
         // Create sqlite-vec virtual table for vectors
-        using var createVecCmd = _connection.CreateCommand();
+        using var createVecCmd = this.connection.CreateCommand();
         createVecCmd.CommandText = $"""
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
                 ChunkKey TEXT PRIMARY KEY,
-                Vector   float[{_options.Ollama.Dimensions}]
+                Vector   float[{this.options.Ollama.Dimensions}]
             );
             """;
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        _logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}",
-            _options.DatabasePath, _options.Ollama.Dimensions);
+        this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}",
+            this.options.DatabasePath, this.options.Ollama.Dimensions);
     }
 
     public async Task StoreMemoryAsync(string memoryId, string content, List<ChunkRecord> chunks, List<float[]> vectors, CancellationToken cancellationToken = default)
     {
         if (chunks.Count != vectors.Count)
+        {
             throw new ArgumentException("Chunks and vectors must have the same count.");
+        }
 
         // Write content file
-        var contentPath = GetContentPath(memoryId);
+        var contentPath = this.GetContentPath(memoryId);
         await File.WriteAllTextAsync(contentPath, content, cancellationToken);
 
-        using var transaction = _connection.BeginTransaction();
+        using var transaction = this.connection.BeginTransaction();
         try
         {
             for (int i = 0; i < chunks.Count; i++)
@@ -106,7 +110,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
                 var vector = vectors[i];
 
                 // Insert chunk metadata
-                using var insertChunkCmd = _connection.CreateCommand();
+                using var insertChunkCmd = this.connection.CreateCommand();
                 insertChunkCmd.Transaction = transaction;
                 insertChunkCmd.CommandText = """
                     INSERT INTO chunks (MemoryId, ChunkIndex, StartOffset, Length, Title, Tags, CreatedAt, UpdatedAt)
@@ -123,7 +127,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
                 await insertChunkCmd.ExecuteNonQueryAsync(cancellationToken);
 
                 // Insert vector
-                using var insertVecCmd = _connection.CreateCommand();
+                using var insertVecCmd = this.connection.CreateCommand();
                 insertVecCmd.Transaction = transaction;
                 insertVecCmd.CommandText = """
                     INSERT INTO chunks_vec (ChunkKey, Vector)
@@ -135,14 +139,16 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             }
 
             transaction.Commit();
-            _logger.LogDebug("Stored memory {MemoryId} with {ChunkCount} chunks.", memoryId, chunks.Count);
+            this.logger.LogDebug("Stored memory {MemoryId} with {ChunkCount} chunks.", memoryId, chunks.Count);
         }
         catch
         {
             transaction.Rollback();
             // Clean up the content file if DB insert failed
             if (File.Exists(contentPath))
+            {
                 File.Delete(contentPath);
+            }
             throw;
         }
     }
@@ -150,7 +156,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     public async Task<MemoryResult?> GetMemoryAsync(string memoryId, CancellationToken cancellationToken = default)
     {
         // Get metadata from first chunk
-        using var cmd = _connection.CreateCommand();
+        using var cmd = this.connection.CreateCommand();
         cmd.CommandText = """
             SELECT Title, Tags, CreatedAt, UpdatedAt
             FROM chunks
@@ -160,7 +166,9 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
+        {
             return null;
+        }
 
         var title = reader.IsDBNull(0) ? null : reader.GetString(0);
         var tags = JsonSerializer.Deserialize<List<string>>(reader.GetString(1)) ?? [];
@@ -168,10 +176,10 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         var updatedAt = DateTimeOffset.Parse(reader.GetString(3));
 
         // Read content from file
-        var contentPath = GetContentPath(memoryId);
+        var contentPath = this.GetContentPath(memoryId);
         if (!File.Exists(contentPath))
         {
-            _logger.LogWarning("Content file missing for memory {MemoryId}.", memoryId);
+            this.logger.LogWarning("Content file missing for memory {MemoryId}.", memoryId);
             return null;
         }
 
@@ -191,7 +199,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     public async Task UpdateMetadataAsync(string memoryId, string? title, List<string>? tags, DateTimeOffset updatedAt, CancellationToken cancellationToken = default)
     {
         var setClauses = new List<string> { "UpdatedAt = @updatedAt" };
-        using var cmd = _connection.CreateCommand();
+        using var cmd = this.connection.CreateCommand();
         cmd.Parameters.AddWithValue("@memoryId", memoryId);
         cmd.Parameters.AddWithValue("@updatedAt", updatedAt.ToString("o"));
 
@@ -214,14 +222,16 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     public async Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default)
     {
         // Check if exists
-        if (!await ExistsAsync(memoryId, cancellationToken))
+        if (!await this.ExistsAsync(memoryId, cancellationToken))
+        {
             return false;
+        }
 
-        using var transaction = _connection.BeginTransaction();
+        using var transaction = this.connection.BeginTransaction();
         try
         {
             // Delete vectors
-            using var deleteVecCmd = _connection.CreateCommand();
+            using var deleteVecCmd = this.connection.CreateCommand();
             deleteVecCmd.Transaction = transaction;
             deleteVecCmd.CommandText = """
                 DELETE FROM chunks_vec WHERE ChunkKey LIKE @pattern
@@ -230,7 +240,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             await deleteVecCmd.ExecuteNonQueryAsync(cancellationToken);
 
             // Delete chunk metadata
-            using var deleteChunksCmd = _connection.CreateCommand();
+            using var deleteChunksCmd = this.connection.CreateCommand();
             deleteChunksCmd.Transaction = transaction;
             deleteChunksCmd.CommandText = "DELETE FROM chunks WHERE MemoryId = @memoryId";
             deleteChunksCmd.Parameters.AddWithValue("@memoryId", memoryId);
@@ -245,11 +255,13 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
 
         // Delete content file
-        var contentPath = GetContentPath(memoryId);
+        var contentPath = this.GetContentPath(memoryId);
         if (File.Exists(contentPath))
+        {
             File.Delete(contentPath);
+        }
 
-        _logger.LogDebug("Deleted memory {MemoryId}.", memoryId);
+        this.logger.LogDebug("Deleted memory {MemoryId}.", memoryId);
         return true;
     }
 
@@ -259,7 +271,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         // Fetch more than limit to account for grouping by MemoryId and filtering
         int fetchLimit = limit * 10;
 
-        using var cmd = _connection.CreateCommand();
+        using var cmd = this.connection.CreateCommand();
         cmd.CommandText = """
             SELECT v.ChunkKey, v.distance, c.Title, c.Tags, c.CreatedAt, c.UpdatedAt
             FROM chunks_vec v
@@ -283,7 +295,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             var createdAt = DateTimeOffset.Parse(reader.GetString(4));
             var updatedAt = DateTimeOffset.Parse(reader.GetString(5));
 
-            var (memoryId, _) = ParseChunkKey(chunkKey);
+            var (parsedMemoryId, _) = ParseChunkKey(chunkKey);
 
             // sqlite-vec returns cosine distance (0 = identical, 2 = opposite)
             // Convert to similarity score: similarity = 1 - distance
@@ -291,18 +303,22 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
             // Apply minimum score filter
             if (minScore.HasValue && score < minScore.Value)
+            {
                 continue;
+            }
 
             // Apply tag filter: memory must have at least one of the requested tags
             if (tags is { Count: > 0 } && !tags.Any(t => chunkTags.Contains(t, StringComparer.OrdinalIgnoreCase)))
+            {
                 continue;
+            }
 
             // Group by memory: keep the best score per memory
-            if (!resultsByMemory.TryGetValue(memoryId, out var existing) || score > existing.Score)
+            if (!resultsByMemory.TryGetValue(parsedMemoryId, out var existing) || score > existing.Score)
             {
-                resultsByMemory[memoryId] = new SearchResult
+                resultsByMemory[parsedMemoryId] = new SearchResult
                 {
-                    MemoryId = memoryId,
+                    MemoryId = parsedMemoryId,
                     Title = title,
                     Content = string.Empty, // Will be filled below
                     Tags = chunkTags,
@@ -322,7 +338,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         // Load content for each result
         foreach (var result in topResults)
         {
-            var contentPath = GetContentPath(result.MemoryId);
+            var contentPath = this.GetContentPath(result.MemoryId);
             if (File.Exists(contentPath))
             {
                 result.Content = await File.ReadAllTextAsync(contentPath, cancellationToken);
@@ -334,7 +350,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
     public async Task<bool> ExistsAsync(string memoryId, CancellationToken cancellationToken = default)
     {
-        using var cmd = _connection.CreateCommand();
+        using var cmd = this.connection.CreateCommand();
         cmd.CommandText = "SELECT 1 FROM chunks WHERE MemoryId = @memoryId LIMIT 1";
         cmd.Parameters.AddWithValue("@memoryId", memoryId);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -362,14 +378,14 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     }
 
     private string GetContentPath(string memoryId)
-        => Path.Combine(_options.MemoriesDirectory, $"{memoryId}.memory.data");
+        => Path.Combine(this.options.MemoriesDirectory, $"{memoryId}.memory.data");
 
     public void Dispose()
     {
-        if (!_disposed)
+        if (!this.disposed)
         {
-            _connection.Dispose();
-            _disposed = true;
+            this.connection.Dispose();
+            this.disposed = true;
         }
         GC.SuppressFinalize(this);
     }

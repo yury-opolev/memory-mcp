@@ -2,8 +2,10 @@ using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Models;
 using MemoryMcp.Core.Services;
 using MemoryMcp.Tools;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using Xunit;
 
 namespace MemoryMcp.Tests.Tools;
@@ -14,8 +16,8 @@ namespace MemoryMcp.Tests.Tools;
 /// </summary>
 public class MemoryToolsTests
 {
-    private readonly IMemoryService _memoryService = Substitute.For<IMemoryService>();
-    private readonly MemoryTools _tools;
+    private readonly IMemoryService memoryService = Substitute.For<IMemoryService>();
+    private readonly MemoryTools tools;
 
     public MemoryToolsTests()
     {
@@ -23,7 +25,8 @@ public class MemoryToolsTests
         {
             SearchMaxContentLength = 100, // Small for testing truncation
         });
-        _tools = new MemoryTools(_memoryService, options);
+        var logger = Substitute.For<ILogger<MemoryTools>>();
+        this.tools = new MemoryTools(this.memoryService, options, logger);
     }
 
     // --- IngestMemory Tests ---
@@ -32,11 +35,11 @@ public class MemoryToolsTests
     public async Task IngestMemory_ReturnsSuccessWithId()
     {
         var expectedId = Guid.NewGuid().ToString();
-        _memoryService.IngestAsync(
+        this.memoryService.IngestAsync(
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(expectedId);
 
-        var result = await _tools.IngestMemory("Test content", "Title");
+        var result = await this.tools.IngestMemory("Test content", "Title");
 
         Assert.Contains("Memory stored successfully", result);
         Assert.Contains(expectedId, result);
@@ -45,13 +48,13 @@ public class MemoryToolsTests
     [Fact]
     public async Task IngestMemory_WithJsonTags_ParsesTagsCorrectly()
     {
-        _memoryService.IngestAsync(
+        this.memoryService.IngestAsync(
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns("id");
 
-        await _tools.IngestMemory("Content", tags: "[\"tag1\",\"tag2\"]");
+        await this.tools.IngestMemory("Content", tags: "[\"tag1\",\"tag2\"]");
 
-        await _memoryService.Received(1).IngestAsync(
+        await this.memoryService.Received(1).IngestAsync(
             "Content",
             null,
             Arg.Is<List<string>?>(t => t != null && t.Count == 2 && t[0] == "tag1" && t[1] == "tag2"),
@@ -61,13 +64,13 @@ public class MemoryToolsTests
     [Fact]
     public async Task IngestMemory_WithInvalidJsonTags_TreatsAsingleTag()
     {
-        _memoryService.IngestAsync(
+        this.memoryService.IngestAsync(
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns("id");
 
-        await _tools.IngestMemory("Content", tags: "simple-tag");
+        await this.tools.IngestMemory("Content", tags: "simple-tag");
 
-        await _memoryService.Received(1).IngestAsync(
+        await this.memoryService.Received(1).IngestAsync(
             "Content",
             null,
             Arg.Is<List<string>?>(t => t != null && t.Count == 1 && t[0] == "simple-tag"),
@@ -77,13 +80,13 @@ public class MemoryToolsTests
     [Fact]
     public async Task IngestMemory_WithNullTags_PassesNull()
     {
-        _memoryService.IngestAsync(
+        this.memoryService.IngestAsync(
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns("id");
 
-        await _tools.IngestMemory("Content");
+        await this.tools.IngestMemory("Content");
 
-        await _memoryService.Received(1).IngestAsync(
+        await this.memoryService.Received(1).IngestAsync(
             "Content",
             null,
             null,
@@ -93,17 +96,32 @@ public class MemoryToolsTests
     [Fact]
     public async Task IngestMemory_WithEmptyTags_PassesNull()
     {
-        _memoryService.IngestAsync(
+        this.memoryService.IngestAsync(
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns("id");
 
-        await _tools.IngestMemory("Content", tags: "  ");
+        await this.tools.IngestMemory("Content", tags: "  ");
 
-        await _memoryService.Received(1).IngestAsync(
+        await this.memoryService.Received(1).IngestAsync(
             "Content",
             null,
             null,
             Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task IngestMemory_OllamaError_ReturnsCleanErrorMessage()
+    {
+        this.memoryService.IngestAsync(
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException(
+                "Failed to connect to Ollama at http://localhost:11434.",
+                new HttpRequestException("Connection refused")));
+
+        var result = await this.tools.IngestMemory("Content");
+
+        Assert.Contains("Error:", result);
+        Assert.Contains("Failed to connect to Ollama", result);
     }
 
     // --- GetMemory Tests ---
@@ -112,7 +130,7 @@ public class MemoryToolsTests
     public async Task GetMemory_Found_ReturnsFormattedResult()
     {
         var memoryId = Guid.NewGuid().ToString();
-        _memoryService.GetAsync(memoryId, Arg.Any<CancellationToken>())
+        this.memoryService.GetAsync(memoryId, Arg.Any<CancellationToken>())
             .Returns(new MemoryResult
             {
                 MemoryId = memoryId,
@@ -123,7 +141,7 @@ public class MemoryToolsTests
                 UpdatedAt = DateTimeOffset.Parse("2025-01-15T12:00:00Z"),
             });
 
-        var result = await _tools.GetMemory(memoryId);
+        var result = await this.tools.GetMemory(memoryId);
 
         Assert.Contains($"ID: {memoryId}", result);
         Assert.Contains("Title: Test Title", result);
@@ -137,10 +155,10 @@ public class MemoryToolsTests
     [Fact]
     public async Task GetMemory_NotFound_ReturnsNotFoundMessage()
     {
-        _memoryService.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        this.memoryService.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns((MemoryResult?)null);
 
-        var result = await _tools.GetMemory("nonexistent-id");
+        var result = await this.tools.GetMemory("nonexistent-id");
 
         Assert.Contains("Memory not found", result);
         Assert.Contains("nonexistent-id", result);
@@ -151,7 +169,7 @@ public class MemoryToolsTests
     [Fact]
     public async Task UpdateMemory_NoFieldsProvided_ReturnsErrorMessage()
     {
-        var result = await _tools.UpdateMemory("some-id");
+        var result = await this.tools.UpdateMemory("some-id");
 
         Assert.Contains("No updates provided", result);
     }
@@ -160,7 +178,7 @@ public class MemoryToolsTests
     public async Task UpdateMemory_Success_ReturnsUpdatedResult()
     {
         var memoryId = Guid.NewGuid().ToString();
-        _memoryService.UpdateAsync(
+        this.memoryService.UpdateAsync(
             memoryId, Arg.Any<string?>(), "New Title", Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new MemoryResult
             {
@@ -169,7 +187,7 @@ public class MemoryToolsTests
                 Title = "New Title",
             });
 
-        var result = await _tools.UpdateMemory(memoryId, title: "New Title");
+        var result = await this.tools.UpdateMemory(memoryId, title: "New Title");
 
         Assert.Contains("Memory updated successfully", result);
         Assert.Contains("New Title", result);
@@ -178,11 +196,11 @@ public class MemoryToolsTests
     [Fact]
     public async Task UpdateMemory_NotFound_ReturnsNotFoundMessage()
     {
-        _memoryService.UpdateAsync(
+        this.memoryService.UpdateAsync(
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns((MemoryResult?)null);
 
-        var result = await _tools.UpdateMemory("nonexistent", title: "Title");
+        var result = await this.tools.UpdateMemory("nonexistent", title: "Title");
 
         Assert.Contains("Memory not found", result);
     }
@@ -191,18 +209,33 @@ public class MemoryToolsTests
     public async Task UpdateMemory_WithTags_ParsesAndPassesTags()
     {
         var memoryId = Guid.NewGuid().ToString();
-        _memoryService.UpdateAsync(
+        this.memoryService.UpdateAsync(
             memoryId, null, null, Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new MemoryResult { MemoryId = memoryId, Content = "c" });
 
-        await _tools.UpdateMemory(memoryId, tags: "[\"new-tag\"]");
+        await this.tools.UpdateMemory(memoryId, tags: "[\"new-tag\"]");
 
-        await _memoryService.Received(1).UpdateAsync(
+        await this.memoryService.Received(1).UpdateAsync(
             memoryId,
             null,
             null,
             Arg.Is<List<string>?>(t => t != null && t.Count == 1 && t[0] == "new-tag"),
             Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task UpdateMemory_OllamaError_ReturnsCleanErrorMessage()
+    {
+        this.memoryService.UpdateAsync(
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException(
+                "Ollama returned an error for model 'test'.",
+                new Exception("model not found")));
+
+        var result = await this.tools.UpdateMemory("id", content: "new content");
+
+        Assert.Contains("Error:", result);
+        Assert.Contains("Ollama returned an error", result);
     }
 
     // --- DeleteMemory Tests ---
@@ -211,9 +244,9 @@ public class MemoryToolsTests
     public async Task DeleteMemory_Success_ReturnsDeletedMessage()
     {
         var memoryId = Guid.NewGuid().ToString();
-        _memoryService.DeleteAsync(memoryId, Arg.Any<CancellationToken>()).Returns(true);
+        this.memoryService.DeleteAsync(memoryId, Arg.Any<CancellationToken>()).Returns(true);
 
-        var result = await _tools.DeleteMemory(memoryId);
+        var result = await this.tools.DeleteMemory(memoryId);
 
         Assert.Contains("deleted successfully", result);
         Assert.Contains(memoryId, result);
@@ -222,9 +255,9 @@ public class MemoryToolsTests
     [Fact]
     public async Task DeleteMemory_NotFound_ReturnsNotFoundMessage()
     {
-        _memoryService.DeleteAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(false);
+        this.memoryService.DeleteAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(false);
 
-        var result = await _tools.DeleteMemory("nonexistent");
+        var result = await this.tools.DeleteMemory("nonexistent");
 
         Assert.Contains("Memory not found", result);
     }
@@ -234,11 +267,11 @@ public class MemoryToolsTests
     [Fact]
     public async Task SearchMemory_NoResults_ReturnsNoMatchMessage()
     {
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>());
 
-        var result = await _tools.SearchMemory("some query");
+        var result = await this.tools.SearchMemory("some query");
 
         Assert.Contains("No matching memories found", result);
     }
@@ -246,7 +279,7 @@ public class MemoryToolsTests
     [Fact]
     public async Task SearchMemory_WithResults_FormatsCorrectly()
     {
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>
             {
@@ -262,7 +295,7 @@ public class MemoryToolsTests
                 },
             });
 
-        var result = await _tools.SearchMemory("query");
+        var result = await this.tools.SearchMemory("query");
 
         Assert.Contains("Found 1 matching memories", result);
         Assert.Contains("id1", result);
@@ -278,7 +311,7 @@ public class MemoryToolsTests
         // SearchMaxContentLength is set to 100 in test setup
         var longContent = new string('A', 200);
 
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>
             {
@@ -292,7 +325,7 @@ public class MemoryToolsTests
                 },
             });
 
-        var result = await _tools.SearchMemory("query");
+        var result = await this.tools.SearchMemory("query");
 
         Assert.Contains("[truncated]", result);
         Assert.Contains("get_memory", result);
@@ -306,7 +339,7 @@ public class MemoryToolsTests
     {
         var shortContent = "Short";
 
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>
             {
@@ -320,7 +353,7 @@ public class MemoryToolsTests
                 },
             });
 
-        var result = await _tools.SearchMemory("query");
+        var result = await this.tools.SearchMemory("query");
 
         Assert.Contains("Short", result);
         Assert.DoesNotContain("[truncated]", result);
@@ -329,7 +362,7 @@ public class MemoryToolsTests
     [Fact]
     public async Task SearchMemory_MultipleResults_FormatsAll()
     {
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>
             {
@@ -338,7 +371,7 @@ public class MemoryToolsTests
                 new() { MemoryId = "id3", Content = "Third", Score = 0.7f, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow },
             });
 
-        var result = await _tools.SearchMemory("query");
+        var result = await this.tools.SearchMemory("query");
 
         Assert.Contains("Found 3 matching memories", result);
         Assert.Contains("id1", result);
@@ -349,13 +382,13 @@ public class MemoryToolsTests
     [Fact]
     public async Task SearchMemory_PassesParametersCorrectly()
     {
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>());
 
-        await _tools.SearchMemory("test query", limit: 10, minScore: 0.5f, tags: "[\"tag1\",\"tag2\"]");
+        await this.tools.SearchMemory("test query", limit: 10, minScore: 0.5f, tags: "[\"tag1\",\"tag2\"]");
 
-        await _memoryService.Received(1).SearchAsync(
+        await this.memoryService.Received(1).SearchAsync(
             "test query",
             10,
             0.5f,
@@ -366,7 +399,7 @@ public class MemoryToolsTests
     [Fact]
     public async Task SearchMemory_NoTitle_DoesNotShowTitleLine()
     {
-        _memoryService.SearchAsync(
+        this.memoryService.SearchAsync(
             Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
             .Returns(new List<SearchResult>
             {
@@ -382,17 +415,32 @@ public class MemoryToolsTests
                 },
             });
 
-        var result = await _tools.SearchMemory("query");
+        var result = await this.tools.SearchMemory("query");
 
         Assert.DoesNotContain("Title:", result);
         Assert.DoesNotContain("Tags:", result);
     }
 
     [Fact]
+    public async Task SearchMemory_OllamaError_ReturnsCleanErrorMessage()
+    {
+        this.memoryService.SearchAsync(
+            Arg.Any<string>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException(
+                "Failed to connect to Ollama at http://localhost:11434.",
+                new HttpRequestException("Connection refused")));
+
+        var result = await this.tools.SearchMemory("query");
+
+        Assert.Contains("Error:", result);
+        Assert.Contains("Failed to connect to Ollama", result);
+    }
+
+    [Fact]
     public async Task GetMemory_NoTitle_DoesNotShowTitleLine()
     {
         var memoryId = Guid.NewGuid().ToString();
-        _memoryService.GetAsync(memoryId, Arg.Any<CancellationToken>())
+        this.memoryService.GetAsync(memoryId, Arg.Any<CancellationToken>())
             .Returns(new MemoryResult
             {
                 MemoryId = memoryId,
@@ -401,7 +449,7 @@ public class MemoryToolsTests
                 Tags = [],
             });
 
-        var result = await _tools.GetMemory(memoryId);
+        var result = await this.tools.GetMemory(memoryId);
 
         Assert.DoesNotContain("Title:", result);
         Assert.DoesNotContain("Tags:", result);

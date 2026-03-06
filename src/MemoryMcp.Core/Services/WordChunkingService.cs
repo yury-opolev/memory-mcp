@@ -10,40 +10,52 @@ namespace MemoryMcp.Core.Services;
 /// </summary>
 public class WordChunkingService : IChunkingService
 {
-    private readonly int _chunkSizeWords;
-    private readonly int _chunkOverlapWords;
+    private readonly int chunkSizeWords;
+    private readonly int chunkOverlapWords;
 
     public WordChunkingService(IOptions<MemoryMcpOptions> options)
     {
-        _chunkSizeWords = options.Value.ChunkSizeWords;
-        _chunkOverlapWords = options.Value.ChunkOverlapWords;
+        this.chunkSizeWords = options.Value.ChunkSizeWords;
+        this.chunkOverlapWords = options.Value.ChunkOverlapWords;
 
-        if (_chunkSizeWords <= 0)
+        if (this.chunkSizeWords <= 0)
+        {
             throw new ArgumentException("ChunkSizeWords must be positive.", nameof(options));
-        if (_chunkOverlapWords < 0)
+        }
+
+        if (this.chunkOverlapWords < 0)
+        {
             throw new ArgumentException("ChunkOverlapWords must be non-negative.", nameof(options));
-        if (_chunkOverlapWords >= _chunkSizeWords)
+        }
+
+        if (this.chunkOverlapWords >= this.chunkSizeWords)
+        {
             throw new ArgumentException("ChunkOverlapWords must be less than ChunkSizeWords.", nameof(options));
+        }
     }
 
     public List<ChunkInfo> Chunk(string text)
     {
         if (string.IsNullOrEmpty(text))
+        {
             return [];
+        }
 
         // Find word boundaries: each entry is (startCharIndex, endCharIndex) of a word
         var wordSpans = FindWordSpans(text);
 
         if (wordSpans.Count == 0)
+        {
             return [];
+        }
 
         var chunks = new List<ChunkInfo>();
-        int stride = _chunkSizeWords - _chunkOverlapWords;
+        int stride = this.chunkSizeWords - this.chunkOverlapWords;
         int chunkIndex = 0;
 
         for (int wordStart = 0; wordStart < wordSpans.Count; wordStart += stride)
         {
-            int wordEnd = Math.Min(wordStart + _chunkSizeWords, wordSpans.Count);
+            int wordEnd = Math.Min(wordStart + this.chunkSizeWords, wordSpans.Count);
 
             int charStart = wordSpans[wordStart].Start;
             int charEnd = wordSpans[wordEnd - 1].End;
@@ -58,7 +70,9 @@ public class WordChunkingService : IChunkingService
 
             // If we've consumed all words, stop
             if (wordEnd >= wordSpans.Count)
+            {
                 break;
+            }
         }
 
         return chunks;
@@ -77,16 +91,22 @@ public class WordChunkingService : IChunkingService
         {
             // Skip whitespace
             while (i < len && char.IsWhiteSpace(text[i]))
+            {
                 i++;
+            }
 
             if (i >= len)
+            {
                 break;
+            }
 
             int start = i;
 
             // Consume non-whitespace
             while (i < len && !char.IsWhiteSpace(text[i]))
+            {
                 i++;
+            }
 
             spans.Add((start, i));
         }

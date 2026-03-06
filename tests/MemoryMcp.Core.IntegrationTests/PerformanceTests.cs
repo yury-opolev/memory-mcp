@@ -16,51 +16,53 @@ namespace MemoryMcp.Core.IntegrationTests;
 [Trait("Category", "Integration")]
 public class PerformanceTests : IAsyncLifetime, IDisposable
 {
-    private readonly string _tempDir;
-    private readonly MemoryMcpOptions _options;
-    private readonly OllamaEmbeddingService? _embeddingService;
-    private readonly WordChunkingService _chunkingService;
-    private SqliteVecMemoryStore? _store;
-    private MemoryService? _memoryService;
-    private bool _ollamaAvailable;
+    private readonly string tempDir;
+    private readonly MemoryMcpOptions options;
+    private readonly OllamaEmbeddingService? embeddingService;
+    private readonly WordChunkingService chunkingService;
+    private SqliteVecMemoryStore? store;
+    private MemoryService? memoryService;
+    private bool ollamaAvailable;
 
     public PerformanceTests()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), $"memory-mcp-perf-test-{Guid.NewGuid():N}");
-        _options = new MemoryMcpOptions
+        this.tempDir = Path.Combine(Path.GetTempPath(), $"memory-mcp-perf-test-{Guid.NewGuid():N}");
+        this.options = new MemoryMcpOptions
         {
-            DataDirectory = _tempDir,
+            DataDirectory = this.tempDir,
         };
 
-        var optionsWrapper = Options.Create(_options);
-        _chunkingService = new WordChunkingService(optionsWrapper);
+        var optionsWrapper = Options.Create(this.options);
+        this.chunkingService = new WordChunkingService(optionsWrapper);
 
         try
         {
-            _embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
-            _embeddingService.EmbedAsync("warmup").GetAwaiter().GetResult();
-            _ollamaAvailable = true;
+            this.embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
+            this.embeddingService.EmbedAsync("warmup").GetAwaiter().GetResult();
+            this.ollamaAvailable = true;
         }
         catch
         {
-            _ollamaAvailable = false;
+            this.ollamaAvailable = false;
         }
     }
 
     public async ValueTask InitializeAsync()
     {
-        if (!_ollamaAvailable)
+        if (!this.ollamaAvailable)
+        {
             return;
+        }
 
-        _store = new SqliteVecMemoryStore(
-            Options.Create(_options),
+        this.store = new SqliteVecMemoryStore(
+            Options.Create(this.options),
             NullLogger<SqliteVecMemoryStore>.Instance);
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
-        _memoryService = new MemoryService(
-            _chunkingService,
-            _embeddingService!,
-            _store,
+        this.memoryService = new MemoryService(
+            this.chunkingService,
+            this.embeddingService!,
+            this.store,
             NullLogger<MemoryService>.Instance);
     }
 
@@ -68,17 +70,19 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
 
     private void SkipIfNoOllama()
     {
-        if (!_ollamaAvailable)
+        if (!this.ollamaAvailable)
+        {
             Assert.Skip("Ollama is not available. Install Ollama and pull the embedding model to run integration tests.");
+        }
     }
 
     [Fact]
     public async Task SingleEmbedding_CompletesWithinTimeout()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         var sw = Stopwatch.StartNew();
-        await _embeddingService!.EmbedAsync("A short test sentence for latency measurement.");
+        await this.embeddingService!.EmbedAsync("A short test sentence for latency measurement.");
         sw.Stop();
 
         // Single embedding should complete in under 5 seconds (generous for cold model)
@@ -89,14 +93,14 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task BatchEmbedding_10Texts_MeasureThroughput()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         var texts = Enumerable.Range(1, 10)
             .Select(i => $"This is test sentence number {i} for measuring batch embedding throughput performance.")
             .ToList();
 
         var sw = Stopwatch.StartNew();
-        var results = await _embeddingService!.EmbedBatchAsync(texts);
+        var results = await this.embeddingService!.EmbedBatchAsync(texts);
         sw.Stop();
 
         Assert.Equal(10, results.Count);
@@ -113,13 +117,13 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task IngestMemory_ShortContent_CompletesQuickly()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         var content = "This is a short memory with just enough content to be meaningful. " +
                       "It contains some facts about software development practices.";
 
         var sw = Stopwatch.StartNew();
-        var memoryId = await _memoryService!.IngestAsync(content, "Short Memory", ["test"]);
+        var memoryId = await this.memoryService!.IngestAsync(content, "Short Memory", ["test"]);
         sw.Stop();
 
         Assert.NotNull(memoryId);
@@ -132,7 +136,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task IngestMemory_LongContent_MultipleChunks()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // Generate content that will produce multiple chunks (>512 words)
         var words = Enumerable.Range(1, 1200)
@@ -141,13 +145,13 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         var content = string.Join(" ", words);
 
         var sw = Stopwatch.StartNew();
-        var memoryId = await _memoryService!.IngestAsync(content, "Long Memory", ["test", "performance"]);
+        var memoryId = await this.memoryService!.IngestAsync(content, "Long Memory", ["test", "performance"]);
         sw.Stop();
 
         Assert.NotNull(memoryId);
 
         // Verify it was chunked (>512 words should produce multiple chunks)
-        var result = await _memoryService.GetAsync(memoryId);
+        var result = await this.memoryService.GetAsync(memoryId);
         Assert.NotNull(result);
 
         // Long content ingest (multiple chunks + embeddings) should complete in under 60 seconds
@@ -158,7 +162,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task SearchLatency_WithPopulatedStore()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // First, populate the store with some memories
         var memories = new[]
@@ -172,12 +176,12 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
 
         foreach (var memory in memories)
         {
-            await _memoryService!.IngestAsync(memory, tags: ["perf-test"]);
+            await this.memoryService!.IngestAsync(memory, tags: ["perf-test"]);
         }
 
         // Measure search latency (includes embedding the query + vector search)
         var sw = Stopwatch.StartNew();
-        var results = await _memoryService!.SearchAsync("container orchestration", limit: 3);
+        var results = await this.memoryService!.SearchAsync("container orchestration", limit: 3);
         sw.Stop();
 
         Assert.NotEmpty(results);
@@ -190,12 +194,12 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task GetMemory_Latency()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var memoryId = await _memoryService!.IngestAsync("Test content for get latency measurement.", "Latency Test");
+        var memoryId = await this.memoryService!.IngestAsync("Test content for get latency measurement.", "Latency Test");
 
         var sw = Stopwatch.StartNew();
-        var result = await _memoryService.GetAsync(memoryId);
+        var result = await this.memoryService.GetAsync(memoryId);
         sw.Stop();
 
         Assert.NotNull(result);
@@ -208,12 +212,12 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task DeleteMemory_Latency()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var memoryId = await _memoryService!.IngestAsync("Test content for delete latency measurement.", "Delete Test");
+        var memoryId = await this.memoryService!.IngestAsync("Test content for delete latency measurement.", "Delete Test");
 
         var sw = Stopwatch.StartNew();
-        var deleted = await _memoryService.DeleteAsync(memoryId);
+        var deleted = await this.memoryService.DeleteAsync(memoryId);
         sw.Stop();
 
         Assert.True(deleted);
@@ -226,7 +230,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task ChunkingService_LargeText_IsInstantaneous()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // Generate a large text (10,000 words)
         var words = Enumerable.Range(1, 10000)
@@ -235,7 +239,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         var content = string.Join(" ", words);
 
         var sw = Stopwatch.StartNew();
-        var chunks = _chunkingService.Chunk(content);
+        var chunks = this.chunkingService.Chunk(content);
         sw.Stop();
 
         Assert.True(chunks.Count > 1);
@@ -247,13 +251,15 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
 
     public void Dispose()
     {
-        _store?.Dispose();
-        _embeddingService?.Dispose();
+        this.store?.Dispose();
+        this.embeddingService?.Dispose();
 
         try
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            if (Directory.Exists(this.tempDir))
+            {
+                Directory.Delete(this.tempDir, recursive: true);
+            }
         }
         catch
         {

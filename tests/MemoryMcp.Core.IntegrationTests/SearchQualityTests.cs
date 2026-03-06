@@ -16,13 +16,13 @@ namespace MemoryMcp.Core.IntegrationTests;
 [Trait("Category", "Integration")]
 public class SearchQualityTests : IAsyncLifetime, IDisposable
 {
-    private readonly string _tempDir;
-    private readonly MemoryMcpOptions _options;
-    private readonly OllamaEmbeddingService? _embeddingService;
-    private readonly WordChunkingService _chunkingService;
-    private SqliteVecMemoryStore? _store;
-    private MemoryService? _memoryService;
-    private bool _ollamaAvailable;
+    private readonly string tempDir;
+    private readonly MemoryMcpOptions options;
+    private readonly OllamaEmbeddingService? embeddingService;
+    private readonly WordChunkingService chunkingService;
+    private SqliteVecMemoryStore? store;
+    private MemoryService? memoryService;
+    private bool ollamaAvailable;
 
     // Golden test set: memories to ingest
     private static readonly (string Content, string Title, List<string> Tags)[] GoldenMemories =
@@ -66,47 +66,49 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
 
     public SearchQualityTests()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), $"memory-mcp-search-test-{Guid.NewGuid():N}");
-        _options = new MemoryMcpOptions
+        this.tempDir = Path.Combine(Path.GetTempPath(), $"memory-mcp-search-test-{Guid.NewGuid():N}");
+        this.options = new MemoryMcpOptions
         {
-            DataDirectory = _tempDir,
+            DataDirectory = this.tempDir,
         };
 
-        var optionsWrapper = Options.Create(_options);
-        _chunkingService = new WordChunkingService(optionsWrapper);
+        var optionsWrapper = Options.Create(this.options);
+        this.chunkingService = new WordChunkingService(optionsWrapper);
 
         try
         {
-            _embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
-            _embeddingService.EmbedAsync("test").GetAwaiter().GetResult();
-            _ollamaAvailable = true;
+            this.embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
+            this.embeddingService.EmbedAsync("test").GetAwaiter().GetResult();
+            this.ollamaAvailable = true;
         }
         catch
         {
-            _ollamaAvailable = false;
+            this.ollamaAvailable = false;
         }
     }
 
     public async ValueTask InitializeAsync()
     {
-        if (!_ollamaAvailable)
+        if (!this.ollamaAvailable)
+        {
             return;
+        }
 
-        _store = new SqliteVecMemoryStore(
-            Options.Create(_options),
+        this.store = new SqliteVecMemoryStore(
+            Options.Create(this.options),
             NullLogger<SqliteVecMemoryStore>.Instance);
-        await _store.InitializeAsync();
+        await this.store.InitializeAsync();
 
-        _memoryService = new MemoryService(
-            _chunkingService,
-            _embeddingService!,
-            _store,
+        this.memoryService = new MemoryService(
+            this.chunkingService,
+            this.embeddingService!,
+            this.store,
             NullLogger<MemoryService>.Instance);
 
         // Ingest all golden memories
         foreach (var (content, title, tags) in GoldenMemories)
         {
-            await _memoryService.IngestAsync(content, title, tags);
+            await this.memoryService.IngestAsync(content, title, tags);
         }
     }
 
@@ -114,16 +116,18 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
 
     private void SkipIfNoOllama()
     {
-        if (!_ollamaAvailable)
+        if (!this.ollamaAvailable)
+        {
             Assert.Skip("Ollama is not available. Install Ollama and pull the embedding model to run integration tests.");
+        }
     }
 
     [Fact]
     public async Task Search_AsyncProgramming_FindsCSharpMemory()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("How do I use async await in C#?", limit: 3);
+        var results = await this.memoryService!.SearchAsync("How do I use async await in C#?", limit: 3);
 
         Assert.NotEmpty(results);
         // The top result should be the C# async programming memory
@@ -133,9 +137,9 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_ContainerDeployment_FindsDockerMemory()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("container deployment and packaging applications", limit: 3);
+        var results = await this.memoryService!.SearchAsync("container deployment and packaging applications", limit: 3);
 
         Assert.NotEmpty(results);
         Assert.Equal("Docker Containers Guide", results[0].Title);
@@ -144,9 +148,9 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_DatabaseQuery_FindsPostgreSQLMemory()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("relational database with JSON support and full text search", limit: 3);
+        var results = await this.memoryService!.SearchAsync("relational database with JSON support and full text search", limit: 3);
 
         Assert.NotEmpty(results);
         Assert.Equal("PostgreSQL Database Notes", results[0].Title);
@@ -155,9 +159,9 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_AIModels_FindsMachineLearningMemory()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("training neural networks and AI models", limit: 3);
+        var results = await this.memoryService!.SearchAsync("training neural networks and AI models", limit: 3);
 
         Assert.NotEmpty(results);
         Assert.Equal("Machine Learning Fundamentals", results[0].Title);
@@ -166,9 +170,9 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_VersionControl_FindsGitMemory()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("version control branching and merging code", limit: 3);
+        var results = await this.memoryService!.SearchAsync("version control branching and merging code", limit: 3);
 
         Assert.NotEmpty(results);
         Assert.Equal("Git Branching Strategies", results[0].Title);
@@ -177,10 +181,10 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_WithTagFilter_OnlyReturnsMatchingTags()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // Search with a broad query but filter to only "devops" tagged memories
-        var results = await _memoryService!.SearchAsync(
+        var results = await this.memoryService!.SearchAsync(
             "best practices for software development",
             limit: 10,
             tags: ["devops"]);
@@ -193,10 +197,10 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_WithMinScore_FiltersLowSimilarity()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // Very specific query, high threshold
-        var results = await _memoryService!.SearchAsync(
+        var results = await this.memoryService!.SearchAsync(
             "async await Task ConfigureAwait C#",
             limit: 10,
             minScore: 0.5f);
@@ -210,9 +214,9 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_ReturnsResultsInDescendingScoreOrder()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("programming concepts", limit: 5);
+        var results = await this.memoryService!.SearchAsync("programming concepts", limit: 5);
 
         Assert.NotEmpty(results);
         for (int i = 1; i < results.Count; i++)
@@ -225,9 +229,9 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_LimitRespected()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
-        var results = await _memoryService!.SearchAsync("software development", limit: 2);
+        var results = await this.memoryService!.SearchAsync("software development", limit: 2);
 
         Assert.True(results.Count <= 2, $"Expected at most 2 results, got {results.Count}");
     }
@@ -235,7 +239,7 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_PrecisionAtK_TopResultIsRelevant()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // Run multiple queries and check precision@1
         var queries = new (string Query, string ExpectedTitle)[]
@@ -250,9 +254,11 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
         int correctAtK1 = 0;
         foreach (var (query, expectedTitle) in queries)
         {
-            var results = await _memoryService!.SearchAsync(query, limit: 1);
+            var results = await this.memoryService!.SearchAsync(query, limit: 1);
             if (results.Count > 0 && results[0].Title == expectedTitle)
+            {
                 correctAtK1++;
+            }
         }
 
         float precision = (float)correctAtK1 / queries.Length;
@@ -263,7 +269,7 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task Search_RecallAtK3_AllRelevantInTopK()
     {
-        SkipIfNoOllama();
+        this.SkipIfNoOllama();
 
         // For each query, the relevant memory should appear in top 3
         var queries = new (string Query, string ExpectedTitle)[]
@@ -278,9 +284,11 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
         int foundInTopK = 0;
         foreach (var (query, expectedTitle) in queries)
         {
-            var results = await _memoryService!.SearchAsync(query, limit: 3);
+            var results = await this.memoryService!.SearchAsync(query, limit: 3);
             if (results.Any(r => r.Title == expectedTitle))
+            {
                 foundInTopK++;
+            }
         }
 
         float recall = (float)foundInTopK / queries.Length;
@@ -290,13 +298,15 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
 
     public void Dispose()
     {
-        _store?.Dispose();
-        _embeddingService?.Dispose();
+        this.store?.Dispose();
+        this.embeddingService?.Dispose();
 
         try
         {
-            if (Directory.Exists(_tempDir))
-                Directory.Delete(_tempDir, recursive: true);
+            if (Directory.Exists(this.tempDir))
+            {
+                Directory.Delete(this.tempDir, recursive: true);
+            }
         }
         catch
         {
