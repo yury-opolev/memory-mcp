@@ -1,0 +1,160 @@
+using System.ComponentModel;
+using System.Text;
+using System.Text.Json;
+using MemoryMcp.Core.Configuration;
+using MemoryMcp.Core.Services;
+using Microsoft.Extensions.Options;
+using ModelContextProtocol.Server;
+
+namespace MemoryMcp.Tools;
+
+/// <summary>
+/// MCP tool definitions for the memory service.
+/// Each method is a tool exposed to MCP clients.
+/// </summary>
+[McpServerToolType]
+public class MemoryTools
+{
+    private readonly IMemoryService _memoryService;
+    private readonly MemoryMcpOptions _options;
+
+    public MemoryTools(IMemoryService memoryService, IOptions<MemoryMcpOptions> options)
+    {
+        _memoryService = memoryService;
+        _options = options.Value;
+    }
+
+    [McpServerTool(Name = "ingest_memory")]
+    [Description("Store a new memory. The content will be chunked, embedded, and indexed for semantic search.")]
+    public async Task<string> IngestMemory(
+        [Description("The full text content to store as a memory.")] string content,
+        [Description("Optional short title or label for the memory.")] string? title = null,
+        [Description("Optional tags for categorization, as a JSON array of strings (e.g. [\"project\",\"notes\"]).")] string? tags = null,
+        CancellationToken cancellationToken = default)
+    {
+        var tagList = ParseTags(tags);
+        var memoryId = await _memoryService.IngestAsync(content, title, tagList, cancellationToken);
+        return $"Memory stored successfully. ID: {memoryId}";
+    }
+
+    [McpServerTool(Name = "get_memory")]
+    [Description("Retrieve a memory by its ID, including full content, title, tags, and timestamps.")]
+    public async Task<string> GetMemory(
+        [Description("The memory ID (GUID) to retrieve.")] string id,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await _memoryService.GetAsync(id, cancellationToken);
+        if (result is null)
+            return $"Memory not found: {id}";
+
+        return FormatMemoryResult(result);
+    }
+
+    [McpServerTool(Name = "update_memory")]
+    [Description("Update an existing memory. If content is provided, it will be re-chunked and re-embedded. Title and tags can be updated independently.")]
+    public async Task<string> UpdateMemory(
+        [Description("The memory ID (GUID) to update.")] string id,
+        [Description("New content text. If provided, the memory will be re-chunked and re-embedded.")] string? content = null,
+        [Description("New title for the memory.")] string? title = null,
+        [Description("New tags as a JSON array of strings (e.g. [\"project\",\"notes\"]).")] string? tags = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (content is null && title is null && tags is null)
+            return "No updates provided. Specify at least one of: content, title, or tags.";
+
+        var tagList = ParseTags(tags);
+        var result = await _memoryService.UpdateAsync(id, content, title, tagList, cancellationToken);
+        if (result is null)
+            return $"Memory not found: {id}";
+
+        return $"Memory updated successfully.\n\n{FormatMemoryResult(result)}";
+    }
+
+    [McpServerTool(Name = "delete_memory")]
+    [Description("Delete a memory and all its chunks permanently.")]
+    public async Task<string> DeleteMemory(
+        [Description("The memory ID (GUID) to delete.")] string id,
+        CancellationToken cancellationToken = default)
+    {
+        var deleted = await _memoryService.DeleteAsync(id, cancellationToken);
+        return deleted
+            ? $"Memory {id} deleted successfully."
+            : $"Memory not found: {id}";
+    }
+
+    [McpServerTool(Name = "search_memory")]
+    [Description("Search memories by semantic similarity. Returns the most relevant memories ranked by similarity score.")]
+    public async Task<string> SearchMemory(
+        [Description("The search query text. Memories semantically similar to this text will be returned.")] string query,
+        [Description("Maximum number of results to return (default: 5).")] int limit = 5,
+        [Description("Minimum similarity score threshold, 0.0 to 1.0 (optional).")] float? minScore = null,
+        [Description("Filter by tags: only return memories with at least one matching tag. JSON array of strings (e.g. [\"project\"]).")] string? tags = null,
+        CancellationToken cancellationToken = default)
+    {
+        var tagList = ParseTags(tags);
+        var results = await _memoryService.SearchAsync(query, limit, minScore, tagList, cancellationToken);
+
+        if (results.Count == 0)
+            return "No matching memories found.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Found {results.Count} matching memories:\n");
+
+        foreach (var result in results)
+        {
+            sb.AppendLine($"--- Memory: {result.MemoryId} (Score: {result.Score:F4}) ---");
+            if (result.Title is not null)
+                sb.AppendLine($"Title: {result.Title}");
+            if (result.Tags.Count > 0)
+                sb.AppendLine($"Tags: {string.Join(", ", result.Tags)}");
+            sb.AppendLine($"Created: {result.CreatedAt:u} | Updated: {result.UpdatedAt:u}");
+
+            // Truncate content if needed
+            var content = result.Content;
+            if (content.Length > _options.SearchMaxContentLength)
+            {
+                content = content[.._options.SearchMaxContentLength];
+                sb.AppendLine(content);
+                sb.AppendLine($"[truncated] Use get_memory with id \"{result.MemoryId}\" to read full content.");
+            }
+            else
+            {
+                sb.AppendLine(content);
+            }
+
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    private static List<string>? ParseTags(string? tagsJson)
+    {
+        if (string.IsNullOrWhiteSpace(tagsJson))
+            return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(tagsJson);
+        }
+        catch (JsonException)
+        {
+            // If not valid JSON array, treat as a single tag
+            return [tagsJson];
+        }
+    }
+
+    private static string FormatMemoryResult(Core.Models.MemoryResult result)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"ID: {result.MemoryId}");
+        if (result.Title is not null)
+            sb.AppendLine($"Title: {result.Title}");
+        if (result.Tags.Count > 0)
+            sb.AppendLine($"Tags: {string.Join(", ", result.Tags)}");
+        sb.AppendLine($"Created: {result.CreatedAt:u}");
+        sb.AppendLine($"Updated: {result.UpdatedAt:u}");
+        sb.AppendLine($"Content:\n{result.Content}");
+        return sb.ToString();
+    }
+}
