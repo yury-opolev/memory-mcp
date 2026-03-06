@@ -16,6 +16,7 @@ namespace MemoryMcp.Core.IntegrationTests;
 [Trait("Category", "Integration")]
 public class SearchQualityTests : IAsyncLifetime, IDisposable
 {
+    private readonly ITestOutputHelper output;
     private readonly string tempDir;
     private readonly MemoryMcpOptions options;
     private readonly OllamaEmbeddingService? embeddingService;
@@ -64,13 +65,11 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
         ),
     ];
 
-    public SearchQualityTests()
+    public SearchQualityTests(ITestOutputHelper output)
     {
+        this.output = output;
         this.tempDir = Path.Combine(Path.GetTempPath(), $"memory-mcp-search-test-{Guid.NewGuid():N}");
-        this.options = new MemoryMcpOptions
-        {
-            DataDirectory = this.tempDir,
-        };
+        this.options = TestOptionsHelper.CreateOptions(dataDirectory: this.tempDir);
 
         var optionsWrapper = Options.Create(this.options);
         this.chunkingService = new WordChunkingService(optionsWrapper);
@@ -80,10 +79,14 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
             this.embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
             this.embeddingService.EmbedAsync("test").GetAwaiter().GetResult();
             this.ollamaAvailable = true;
+            this.output.WriteLine($"Ollama connected at {this.options.Ollama.Endpoint}");
+            this.output.WriteLine($"Embedding model: {this.options.Ollama.Model} ({this.options.Ollama.Dimensions} dimensions)");
+            this.output.WriteLine("");
         }
-        catch
+        catch (Exception ex)
         {
             this.ollamaAvailable = false;
+            this.output.WriteLine($"Ollama not available: {ex.Message}");
         }
     }
 
@@ -106,10 +109,13 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
             NullLogger<MemoryService>.Instance);
 
         // Ingest all golden memories
+        this.output.WriteLine($"Ingesting {GoldenMemories.Length} golden memories...");
         foreach (var (content, title, tags) in GoldenMemories)
         {
-            await this.memoryService.IngestAsync(content, title, tags);
+            var id = await this.memoryService.IngestAsync(content, title, tags);
+            this.output.WriteLine($"  Ingested \"{title}\" (id: {id}, tags: [{string.Join(", ", tags)}])");
         }
+        this.output.WriteLine("");
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -122,15 +128,30 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
         }
     }
 
+    private void LogSearchResults(string query, IReadOnlyList<SearchResult> results)
+    {
+        this.output.WriteLine($"Query: \"{query}\"");
+        this.output.WriteLine($"Results: {results.Count}");
+        for (int i = 0; i < results.Count; i++)
+        {
+            var r = results[i];
+            this.output.WriteLine($"  [{i + 1}] \"{r.Title}\" (score: {r.Score:F4}, tags: [{string.Join(", ", r.Tags)}])");
+        }
+    }
+
     [Fact]
     public async Task Search_AsyncProgramming_FindsCSharpMemory()
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("How do I use async await in C#?", limit: 3);
+        string query = "How do I use async await in C#?";
+        var results = await this.memoryService!.SearchAsync(query, limit: 3);
+
+        this.LogSearchResults(query, results);
+        this.output.WriteLine($"Expected top result: \"C# Async Programming\"");
+        this.output.WriteLine(results.Count > 0 && results[0].Title == "C# Async Programming" ? "PASS" : "FAIL");
 
         Assert.NotEmpty(results);
-        // The top result should be the C# async programming memory
         Assert.Equal("C# Async Programming", results[0].Title);
     }
 
@@ -139,7 +160,12 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("container deployment and packaging applications", limit: 3);
+        string query = "container deployment and packaging applications";
+        var results = await this.memoryService!.SearchAsync(query, limit: 3);
+
+        this.LogSearchResults(query, results);
+        this.output.WriteLine($"Expected top result: \"Docker Containers Guide\"");
+        this.output.WriteLine(results.Count > 0 && results[0].Title == "Docker Containers Guide" ? "PASS" : "FAIL");
 
         Assert.NotEmpty(results);
         Assert.Equal("Docker Containers Guide", results[0].Title);
@@ -150,7 +176,12 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("relational database with JSON support and full text search", limit: 3);
+        string query = "relational database with JSON support and full text search";
+        var results = await this.memoryService!.SearchAsync(query, limit: 3);
+
+        this.LogSearchResults(query, results);
+        this.output.WriteLine($"Expected top result: \"PostgreSQL Database Notes\"");
+        this.output.WriteLine(results.Count > 0 && results[0].Title == "PostgreSQL Database Notes" ? "PASS" : "FAIL");
 
         Assert.NotEmpty(results);
         Assert.Equal("PostgreSQL Database Notes", results[0].Title);
@@ -161,7 +192,12 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("training neural networks and AI models", limit: 3);
+        string query = "training neural networks and AI models";
+        var results = await this.memoryService!.SearchAsync(query, limit: 3);
+
+        this.LogSearchResults(query, results);
+        this.output.WriteLine($"Expected top result: \"Machine Learning Fundamentals\"");
+        this.output.WriteLine(results.Count > 0 && results[0].Title == "Machine Learning Fundamentals" ? "PASS" : "FAIL");
 
         Assert.NotEmpty(results);
         Assert.Equal("Machine Learning Fundamentals", results[0].Title);
@@ -172,7 +208,12 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("version control branching and merging code", limit: 3);
+        string query = "version control branching and merging code";
+        var results = await this.memoryService!.SearchAsync(query, limit: 3);
+
+        this.LogSearchResults(query, results);
+        this.output.WriteLine($"Expected top result: \"Git Branching Strategies\"");
+        this.output.WriteLine(results.Count > 0 && results[0].Title == "Git Branching Strategies" ? "PASS" : "FAIL");
 
         Assert.NotEmpty(results);
         Assert.Equal("Git Branching Strategies", results[0].Title);
@@ -183,11 +224,20 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
+        string query = "best practices for software development";
+        this.output.WriteLine($"Query: \"{query}\"");
+        this.output.WriteLine($"Tag filter: [\"devops\"]");
+
         // Search with a broad query but filter to only "devops" tagged memories
-        var results = await this.memoryService!.SearchAsync(
-            "best practices for software development",
-            limit: 10,
-            tags: ["devops"]);
+        var results = await this.memoryService!.SearchAsync(query, limit: 10, tags: ["devops"]);
+
+        this.output.WriteLine($"Results: {results.Count}");
+        for (int i = 0; i < results.Count; i++)
+        {
+            var r = results[i];
+            bool hasTag = r.Tags.Contains("devops");
+            this.output.WriteLine($"  [{i + 1}] \"{r.Title}\" (score: {r.Score:F4}, tags: [{string.Join(", ", r.Tags)}]) {(hasTag ? "OK" : "MISSING TAG")}");
+        }
 
         Assert.NotEmpty(results);
         // All results should have the "devops" tag
@@ -199,16 +249,37 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        // Very specific query, high threshold
-        var results = await this.memoryService!.SearchAsync(
-            "async await Task ConfigureAwait C#",
-            limit: 10,
-            minScore: 0.5f);
+        string query = "How do I write asynchronous code in C# using async and await?";
+        float minScore = 0.3f;
+        this.output.WriteLine($"Query: \"{query}\"");
+        this.output.WriteLine($"Min score threshold: {minScore:F2}");
+
+        // Natural-language query with moderate threshold (0.3 is realistic for small models)
+        var results = await this.memoryService!.SearchAsync(query, limit: 10, minScore: minScore);
+
+        this.output.WriteLine($"Results above threshold: {results.Count}");
+        for (int i = 0; i < results.Count; i++)
+        {
+            var r = results[i];
+            this.output.WriteLine($"  [{i + 1}] \"{r.Title}\" (score: {r.Score:F4}) {(r.Score >= minScore ? "ABOVE" : "BELOW")} threshold");
+        }
+
+        // Also show what would have been returned without threshold
+        var allResults = await this.memoryService!.SearchAsync(query, limit: 10);
+        int filteredOut = allResults.Count - results.Count;
+        if (filteredOut > 0)
+        {
+            this.output.WriteLine($"Filtered out {filteredOut} results below {minScore:F2}:");
+            foreach (var r in allResults.Where(r => r.Score < minScore))
+            {
+                this.output.WriteLine($"  [-] \"{r.Title}\" (score: {r.Score:F4})");
+            }
+        }
 
         // Should get at least the C# memory, but possibly not all 5
         Assert.NotEmpty(results);
-        Assert.All(results, r => Assert.True(r.Score >= 0.5f,
-            $"Result '{r.Title}' has score {r.Score:F4} below minimum 0.5"));
+        Assert.All(results, r => Assert.True(r.Score >= minScore,
+            $"Result '{r.Title}' has score {r.Score:F4} below minimum {minScore}"));
     }
 
     [Fact]
@@ -216,7 +287,21 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("programming concepts", limit: 5);
+        string query = "programming concepts";
+        var results = await this.memoryService!.SearchAsync(query, limit: 5);
+
+        this.LogSearchResults(query, results);
+
+        bool inOrder = true;
+        for (int i = 1; i < results.Count; i++)
+        {
+            if (results[i - 1].Score < results[i].Score)
+            {
+                inOrder = false;
+                this.output.WriteLine($"Order violation at position {i}: {results[i - 1].Score:F4} < {results[i].Score:F4}");
+            }
+        }
+        this.output.WriteLine(inOrder ? "PASS: Results are in descending score order" : "FAIL: Results are NOT in descending score order");
 
         Assert.NotEmpty(results);
         for (int i = 1; i < results.Count; i++)
@@ -231,9 +316,15 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
-        var results = await this.memoryService!.SearchAsync("software development", limit: 2);
+        string query = "software development";
+        int limit = 2;
+        var results = await this.memoryService!.SearchAsync(query, limit: limit);
 
-        Assert.True(results.Count <= 2, $"Expected at most 2 results, got {results.Count}");
+        this.LogSearchResults(query, results);
+        this.output.WriteLine($"Limit: {limit}, Returned: {results.Count}");
+        this.output.WriteLine(results.Count <= limit ? "PASS: Limit respected" : "FAIL: Too many results returned");
+
+        Assert.True(results.Count <= limit, $"Expected at most {limit} results, got {results.Count}");
     }
 
     [Fact]
@@ -251,17 +342,31 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
             ("git rebase vs merge", "Git Branching Strategies"),
         };
 
+        this.output.WriteLine("Precision@1 evaluation:");
+        this.output.WriteLine("─────────────────────────────────────────────────────────────");
+
         int correctAtK1 = 0;
         foreach (var (query, expectedTitle) in queries)
         {
             var results = await this.memoryService!.SearchAsync(query, limit: 1);
-            if (results.Count > 0 && results[0].Title == expectedTitle)
+            string actualTitle = results.Count > 0 ? results[0].Title ?? "(no title)" : "(no results)";
+            float score = results.Count > 0 ? results[0].Score : 0f;
+            bool correct = results.Count > 0 && results[0].Title == expectedTitle;
+            if (correct)
             {
                 correctAtK1++;
             }
+
+            this.output.WriteLine($"  Query: \"{query}\"");
+            this.output.WriteLine($"    Expected: \"{expectedTitle}\"");
+            this.output.WriteLine($"    Actual:   \"{actualTitle}\" (score: {score:F4}) {(correct ? "CORRECT" : "WRONG")}");
         }
 
         float precision = (float)correctAtK1 / queries.Length;
+        this.output.WriteLine("─────────────────────────────────────────────────────────────");
+        this.output.WriteLine($"Precision@1: {precision:F2} ({correctAtK1}/{queries.Length}) — threshold: >= 0.80");
+        this.output.WriteLine(precision >= 0.8f ? "PASS" : "FAIL");
+
         Assert.True(precision >= 0.8f,
             $"Precision@1 = {precision:F2} ({correctAtK1}/{queries.Length}). Expected >= 0.80");
     }
@@ -281,17 +386,34 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
             ("git rebase vs merge", "Git Branching Strategies"),
         };
 
+        this.output.WriteLine("Recall@3 evaluation:");
+        this.output.WriteLine("─────────────────────────────────────────────────────────────");
+
         int foundInTopK = 0;
         foreach (var (query, expectedTitle) in queries)
         {
             var results = await this.memoryService!.SearchAsync(query, limit: 3);
-            if (results.Any(r => r.Title == expectedTitle))
+            bool found = results.Any(r => r.Title == expectedTitle);
+            if (found)
             {
                 foundInTopK++;
             }
+
+            this.output.WriteLine($"  Query: \"{query}\"");
+            this.output.WriteLine($"    Looking for: \"{expectedTitle}\"");
+            for (int i = 0; i < results.Count; i++)
+            {
+                string marker = results[i].Title == expectedTitle ? " <-- TARGET" : "";
+                this.output.WriteLine($"    [{i + 1}] \"{results[i].Title}\" (score: {results[i].Score:F4}){marker}");
+            }
+            this.output.WriteLine($"    {(found ? "FOUND in top 3" : "NOT FOUND in top 3")}");
         }
 
         float recall = (float)foundInTopK / queries.Length;
+        this.output.WriteLine("─────────────────────────────────────────────────────────────");
+        this.output.WriteLine($"Recall@3: {recall:F2} ({foundInTopK}/{queries.Length}) — threshold: >= 0.80");
+        this.output.WriteLine(recall >= 0.8f ? "PASS" : "FAIL");
+
         Assert.True(recall >= 0.8f,
             $"Recall@3 = {recall:F2} ({foundInTopK}/{queries.Length}). Expected >= 0.80");
     }

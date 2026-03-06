@@ -16,6 +16,7 @@ namespace MemoryMcp.Core.IntegrationTests;
 [Trait("Category", "Integration")]
 public class PerformanceTests : IAsyncLifetime, IDisposable
 {
+    private readonly ITestOutputHelper output;
     private readonly string tempDir;
     private readonly MemoryMcpOptions options;
     private readonly OllamaEmbeddingService? embeddingService;
@@ -24,13 +25,11 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     private MemoryService? memoryService;
     private bool ollamaAvailable;
 
-    public PerformanceTests()
+    public PerformanceTests(ITestOutputHelper output)
     {
+        this.output = output;
         this.tempDir = Path.Combine(Path.GetTempPath(), $"memory-mcp-perf-test-{Guid.NewGuid():N}");
-        this.options = new MemoryMcpOptions
-        {
-            DataDirectory = this.tempDir,
-        };
+        this.options = TestOptionsHelper.CreateOptions(dataDirectory: this.tempDir);
 
         var optionsWrapper = Options.Create(this.options);
         this.chunkingService = new WordChunkingService(optionsWrapper);
@@ -40,10 +39,14 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             this.embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
             this.embeddingService.EmbedAsync("warmup").GetAwaiter().GetResult();
             this.ollamaAvailable = true;
+            this.output.WriteLine($"Ollama connected at {this.options.Ollama.Endpoint}");
+            this.output.WriteLine($"Embedding model: {this.options.Ollama.Model} ({this.options.Ollama.Dimensions} dimensions)");
+            this.output.WriteLine("");
         }
-        catch
+        catch (Exception ex)
         {
             this.ollamaAvailable = false;
+            this.output.WriteLine($"Ollama not available: {ex.Message}");
         }
     }
 
@@ -81,9 +84,17 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
+        string text = "A short test sentence for latency measurement.";
+        this.output.WriteLine($"Embedding single text: \"{text}\"");
+
         var sw = Stopwatch.StartNew();
-        await this.embeddingService!.EmbedAsync("A short test sentence for latency measurement.");
+        var embedding = await this.embeddingService!.EmbedAsync(text);
         sw.Stop();
+
+        this.output.WriteLine($"Latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"Vector dimensions: {embedding.Length}");
+        this.output.WriteLine($"Threshold: < 5000 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 5000 ? "PASS" : "FAIL");
 
         // Single embedding should complete in under 5 seconds (generous for cold model)
         Assert.True(sw.ElapsedMilliseconds < 5000,
@@ -99,19 +110,25 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             .Select(i => $"This is test sentence number {i} for measuring batch embedding throughput performance.")
             .ToList();
 
+        this.output.WriteLine($"Embedding batch of {texts.Count} texts...");
+
         var sw = Stopwatch.StartNew();
         var results = await this.embeddingService!.EmbedBatchAsync(texts);
         sw.Stop();
+
+        var perItem = sw.ElapsedMilliseconds / (double)texts.Count;
+        this.output.WriteLine($"Total latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"Per-item latency: {perItem:F1} ms");
+        this.output.WriteLine($"Throughput: {texts.Count / (sw.ElapsedMilliseconds / 1000.0):F1} embeddings/sec");
+        this.output.WriteLine($"Results count: {results.Count}");
+        this.output.WriteLine($"Threshold: < 30000 ms total");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 30000 ? "PASS" : "FAIL");
 
         Assert.Equal(10, results.Count);
 
         // 10 embeddings should complete in under 30 seconds
         Assert.True(sw.ElapsedMilliseconds < 30000,
             $"Batch embedding of 10 texts took {sw.ElapsedMilliseconds}ms, expected < 30000ms");
-
-        var perItem = sw.ElapsedMilliseconds / 10.0;
-        // Output for reference (visible in test output)
-        Assert.True(true, $"Per-item latency: {perItem:F1}ms");
     }
 
     [Fact]
@@ -122,9 +139,17 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         var content = "This is a short memory with just enough content to be meaningful. " +
                       "It contains some facts about software development practices.";
 
+        this.output.WriteLine($"Ingesting short content ({content.Split(' ').Length} words)...");
+
         var sw = Stopwatch.StartNew();
         var memoryId = await this.memoryService!.IngestAsync(content, "Short Memory", ["test"]);
         sw.Stop();
+
+        this.output.WriteLine($"Memory ID: {memoryId}");
+        this.output.WriteLine($"Latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"  (includes: chunking + embedding + SQLite write + file write)");
+        this.output.WriteLine($"Threshold: < 5000 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 5000 ? "PASS" : "FAIL");
 
         Assert.NotNull(memoryId);
 
@@ -144,9 +169,21 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             .ToList();
         var content = string.Join(" ", words);
 
+        // Pre-compute chunk count for logging
+        var chunks = this.chunkingService.Chunk(content);
+        this.output.WriteLine($"Ingesting long content ({words.Count} words, {chunks.Count} chunks)...");
+        this.output.WriteLine($"Chunk config: {this.options.ChunkSizeWords} words/chunk, {this.options.ChunkOverlapWords} words overlap");
+
         var sw = Stopwatch.StartNew();
         var memoryId = await this.memoryService!.IngestAsync(content, "Long Memory", ["test", "performance"]);
         sw.Stop();
+
+        this.output.WriteLine($"Memory ID: {memoryId}");
+        this.output.WriteLine($"Total latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"Per-chunk latency: {sw.ElapsedMilliseconds / (double)chunks.Count:F1} ms");
+        this.output.WriteLine($"  (includes: chunking + {chunks.Count}x embedding + {chunks.Count}x SQLite write + file write)");
+        this.output.WriteLine($"Threshold: < 60000 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 60000 ? "PASS" : "FAIL");
 
         Assert.NotNull(memoryId);
 
@@ -174,15 +211,29 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             "Redis is an in-memory data structure store used for caching and messaging.",
         };
 
+        this.output.WriteLine($"Populating store with {memories.Length} memories...");
         foreach (var memory in memories)
         {
             await this.memoryService!.IngestAsync(memory, tags: ["perf-test"]);
         }
 
+        string query = "container orchestration";
+        this.output.WriteLine($"Searching: \"{query}\"");
+
         // Measure search latency (includes embedding the query + vector search)
         var sw = Stopwatch.StartNew();
-        var results = await this.memoryService!.SearchAsync("container orchestration", limit: 3);
+        var results = await this.memoryService!.SearchAsync(query, limit: 3);
         sw.Stop();
+
+        this.output.WriteLine($"Search latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"  (includes: query embedding + sqlite-vec search + file read)");
+        this.output.WriteLine($"Results: {results.Count}");
+        for (int i = 0; i < results.Count; i++)
+        {
+            this.output.WriteLine($"  [{i + 1}] score: {results[i].Score:F4} — {results[i].Content?[..Math.Min(60, results[i].Content?.Length ?? 0)]}...");
+        }
+        this.output.WriteLine($"Threshold: < 5000 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 5000 ? "PASS" : "FAIL");
 
         Assert.NotEmpty(results);
 
@@ -196,11 +247,21 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
+        this.output.WriteLine("Ingesting test memory...");
         var memoryId = await this.memoryService!.IngestAsync("Test content for get latency measurement.", "Latency Test");
+        this.output.WriteLine($"Memory ID: {memoryId}");
 
+        this.output.WriteLine("Retrieving by ID...");
         var sw = Stopwatch.StartNew();
         var result = await this.memoryService.GetAsync(memoryId);
         sw.Stop();
+
+        this.output.WriteLine($"Get latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"  (no embedding needed — SQLite lookup + file read only)");
+        this.output.WriteLine($"Title: \"{result?.Title}\"");
+        this.output.WriteLine($"Content length: {result?.Content?.Length ?? 0} chars");
+        this.output.WriteLine($"Threshold: < 500 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 500 ? "PASS" : "FAIL");
 
         Assert.NotNull(result);
 
@@ -214,11 +275,24 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
     {
         this.SkipIfNoOllama();
 
+        this.output.WriteLine("Ingesting test memory...");
         var memoryId = await this.memoryService!.IngestAsync("Test content for delete latency measurement.", "Delete Test");
+        this.output.WriteLine($"Memory ID: {memoryId}");
 
+        this.output.WriteLine("Deleting...");
         var sw = Stopwatch.StartNew();
         var deleted = await this.memoryService.DeleteAsync(memoryId);
         sw.Stop();
+
+        this.output.WriteLine($"Delete latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"  (SQLite delete + sqlite-vec delete + file delete)");
+        this.output.WriteLine($"Deleted: {deleted}");
+
+        // Verify it's gone
+        var result = await this.memoryService.GetAsync(memoryId);
+        this.output.WriteLine($"Verify gone: {(result == null ? "yes" : "NO — still exists!")}");
+        this.output.WriteLine($"Threshold: < 500 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 500 ? "PASS" : "FAIL");
 
         Assert.True(deleted);
 
@@ -238,9 +312,18 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             .ToList();
         var content = string.Join(" ", words);
 
+        this.output.WriteLine($"Chunking {words.Count} words...");
+        this.output.WriteLine($"Chunk config: {this.options.ChunkSizeWords} words/chunk, {this.options.ChunkOverlapWords} words overlap");
+
         var sw = Stopwatch.StartNew();
         var chunks = this.chunkingService.Chunk(content);
         sw.Stop();
+
+        this.output.WriteLine($"Chunks produced: {chunks.Count}");
+        this.output.WriteLine($"Chunking latency: {sw.ElapsedMilliseconds} ms");
+        this.output.WriteLine($"  (CPU-only, no I/O or network)");
+        this.output.WriteLine($"Threshold: < 100 ms");
+        this.output.WriteLine(sw.ElapsedMilliseconds < 100 ? "PASS" : "FAIL");
 
         Assert.True(chunks.Count > 1);
 
