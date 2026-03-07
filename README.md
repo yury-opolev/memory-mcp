@@ -135,18 +135,36 @@ The server communicates over stdin/stdout using the MCP protocol. It is designed
 
 ### MCP Client Configuration
 
-Add to your MCP client config (e.g. Claude Desktop, OpenCode, etc.):
+After running `./scripts/run.sh` (or `.\scripts\run.ps1` on Windows), the published binary is at `publish/MemoryMcp` (or `publish\MemoryMcp.exe` on Windows). The run script prints the exact config snippet for your platform.
+
+**OpenCode** (`opencode.jsonc`):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memory": {
+      "type": "local",
+      "command": ["/path/to/memory-mcp/publish/MemoryMcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+**Claude Desktop / VS Code / Cursor** (`mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "memory": {
-      "command": "dotnet",
-      "args": ["run", "--project", "/path/to/memory-mcp/src/MemoryMcp"]
+      "command": "/path/to/memory-mcp/publish/MemoryMcp"
     }
   }
 }
 ```
+
+Replace `/path/to/memory-mcp` with the actual path to your clone.
 
 ## MCP Tools
 
@@ -263,10 +281,19 @@ Text is split by whitespace into words, then grouped into overlapping windows. D
 
 All settings live in `src/MemoryMcp/appsettings.json` and can be overridden with environment variables using the `__` separator (e.g. `MemoryMcp__Ollama__Model`).
 
+By default, data is stored in the platform-specific local application data directory:
+
+| Platform | Default Data Directory |
+|----------|----------------------|
+| Windows | `%LOCALAPPDATA%\memory-mcp` (e.g. `C:\Users\<user>\AppData\Local\memory-mcp`) |
+| Linux | `~/.local/share/memory-mcp` |
+| macOS | `~/.local/share/memory-mcp` |
+
+You can override this with the `DataDirectory` setting or the `MemoryMcp__DataDirectory` environment variable.
+
 ```json
 {
   "MemoryMcp": {
-    "DataDirectory": "./data",
     "MemoriesSubdirectory": "memories",
     "DatabaseFileName": "memory.db",
     "ChunkSizeWords": 512,
@@ -283,7 +310,7 @@ All settings live in `src/MemoryMcp/appsettings.json` and can be overridden with
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `DataDirectory` | `./data` | Root directory for database and content files |
+| `DataDirectory` | `<LocalAppData>/memory-mcp` | Root directory for database and content files |
 | `MemoriesSubdirectory` | `memories` | Subdirectory for `.memory.data` files |
 | `DatabaseFileName` | `memory.db` | SQLite database filename |
 | `ChunkSizeWords` | `512` | Words per chunk |
@@ -346,7 +373,7 @@ memory-mcp/
 
   scripts/
     setup.sh / setup.ps1             Setup scripts (restore, build, pull model)
-    run.sh / run.ps1                 Run scripts (build + start server)
+    run.sh / run.ps1                 Publish + start server (--rebuild to force)
 
   src/
     MemoryMcp.Core/                  Core library (no MCP dependency)

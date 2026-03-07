@@ -53,9 +53,12 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 
-# Memory MCP runtime data
+# Memory MCP runtime data (safety net if DataDirectory is overridden to local path)
 data/
 *.memory.data
+
+# Published binaries
+publish/
 
 # IDE
 .vs/

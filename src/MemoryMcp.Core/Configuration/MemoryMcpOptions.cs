@@ -11,8 +11,17 @@ public class MemoryMcpOptions
 
     /// <summary>
     /// Root directory for all data (SQLite database and memory content files).
+    /// Defaults to the platform-specific local application data directory:
+    ///   Windows: %LOCALAPPDATA%\memory-mcp
+    ///   Linux:   ~/.local/share/memory-mcp
+    ///   macOS:   ~/.local/share/memory-mcp
     /// </summary>
-    public string DataDirectory { get; set; } = "./data";
+    public string DataDirectory { get; set; } = DefaultDataDirectory;
+
+    private static string DefaultDataDirectory =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "memory-mcp");
 
     /// <summary>
     /// Subdirectory under DataDirectory for memory content files.
