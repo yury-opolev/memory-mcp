@@ -81,7 +81,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         createVecCmd.CommandText = $"""
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
                 ChunkKey TEXT PRIMARY KEY,
-                Vector   float[{this.options.Ollama.Dimensions}]
+                Vector   float[{this.options.Ollama.Dimensions}] distance_metric=cosine
             );
             """;
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -297,8 +297,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
             var (parsedMemoryId, _) = ParseChunkKey(chunkKey);
 
-            // sqlite-vec returns cosine distance (0 = identical, 2 = opposite)
-            // Convert to similarity score: similarity = 1 - distance
+            // sqlite-vec with cosine metric returns distance in [0, 2] (0 = identical, 2 = opposite)
+            // Convert to similarity score: similarity = 1 - distance (range: 1 to -1)
             float score = 1.0f - distance;
 
             // Apply minimum score filter
