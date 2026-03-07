@@ -65,3 +65,14 @@ publish/
 .vscode/
 *.user
 *.suo
+
+# Secrets and credentials (defense-in-depth)
+.env
+.env.*
+*.pfx
+*.pem
+*.key
+*.p12
+appsettings.*.json
+!appsettings.json
+secrets.json
