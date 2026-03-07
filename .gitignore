@@ -73,6 +73,4 @@ publish/
 *.pem
 *.key
 *.p12
-appsettings.*.json
-!appsettings.json
 secrets.json
