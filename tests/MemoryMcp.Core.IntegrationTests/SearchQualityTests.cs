@@ -106,7 +106,7 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
             this.chunkingService,
             this.embeddingService!,
             this.store,
-            Options.Create(this.options),
+            new StaticOptionsMonitor<MemoryMcpOptions>(this.options),
             NullLogger<MemoryService>.Instance);
 
         // Ingest all golden memories (force=true to bypass dedup guard for test seeding)

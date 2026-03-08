@@ -66,7 +66,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             this.chunkingService,
             this.embeddingService!,
             this.store,
-            Options.Create(this.options),
+            new StaticOptionsMonitor<MemoryMcpOptions>(this.options),
             NullLogger<MemoryService>.Instance);
     }
 

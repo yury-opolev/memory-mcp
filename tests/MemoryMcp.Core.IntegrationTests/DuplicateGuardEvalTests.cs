@@ -301,7 +301,7 @@ public class DuplicateGuardEvalTests : IAsyncLifetime, IDisposable
             this.chunkingService,
             this.embeddingService!,
             this.store,
-            Options.Create(this.options),
+            new StaticOptionsMonitor<MemoryMcpOptions>(this.options),
             NullLogger<MemoryService>.Instance);
 
         // Seed all base memories (force=true to bypass dedup guard)

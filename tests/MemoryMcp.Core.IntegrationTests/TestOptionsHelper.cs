@@ -1,4 +1,5 @@
 using MemoryMcp.Core.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace MemoryMcp.Core.IntegrationTests;
 
@@ -43,4 +44,15 @@ internal static class TestOptionsHelper
 
         return options;
     }
+}
+
+/// <summary>
+/// Simple <see cref="IOptionsMonitor{TOptions}"/> implementation that returns
+/// a fixed value. Used in integration tests where NSubstitute is not available.
+/// </summary>
+internal sealed class StaticOptionsMonitor<T>(T value) : IOptionsMonitor<T>
+{
+    public T CurrentValue => value;
+    public T Get(string? name) => value;
+    public IDisposable? OnChange(Action<T, string?> listener) => null;
 }

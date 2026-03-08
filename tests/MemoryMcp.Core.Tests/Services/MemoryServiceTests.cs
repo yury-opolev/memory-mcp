@@ -20,8 +20,15 @@ public class MemoryServiceTests
 
     public MemoryServiceTests()
     {
-        var options = Options.Create(this.optionsValue);
-        this.service = new MemoryService(this.chunking, this.embedding, this.store, options, this.logger);
+        var monitor = CreateMonitor(this.optionsValue);
+        this.service = new MemoryService(this.chunking, this.embedding, this.store, monitor, this.logger);
+    }
+
+    private static IOptionsMonitor<MemoryMcpOptions> CreateMonitor(MemoryMcpOptions value)
+    {
+        var monitor = Substitute.For<IOptionsMonitor<MemoryMcpOptions>>();
+        monitor.CurrentValue.Returns(value);
+        return monitor;
     }
 
     private static float[] FakeVector(int dims = 4) => new float[dims];
@@ -402,8 +409,8 @@ public class MemoryServiceTests
     public async Task IngestAsync_ThresholdZero_SkipsDuplicateCheck()
     {
         // Create a new service with threshold=0
-        var zeroThresholdOptions = Options.Create(new MemoryMcpOptions { DuplicateThreshold = 0 });
-        var svc = new MemoryService(this.chunking, this.embedding, this.store, zeroThresholdOptions, this.logger);
+        var zeroThresholdMonitor = CreateMonitor(new MemoryMcpOptions { DuplicateThreshold = 0 });
+        var svc = new MemoryService(this.chunking, this.embedding, this.store, zeroThresholdMonitor, this.logger);
 
         var content = "Content with disabled dedup";
         var chunkInfos = new List<ChunkInfo>

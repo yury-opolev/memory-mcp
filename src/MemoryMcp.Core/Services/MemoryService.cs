@@ -8,26 +8,28 @@ namespace MemoryMcp.Core.Services;
 
 /// <summary>
 /// Orchestrates chunking, embedding, and storage for memory operations.
+/// Uses <see cref="IOptionsMonitor{TOptions}"/> so that <see cref="MemoryMcpOptions.DuplicateThreshold"/>
+/// and other options can be updated at runtime without restarting the service.
 /// </summary>
 public class MemoryService : IMemoryService
 {
     private readonly IChunkingService chunking;
     private readonly IEmbeddingService embedding;
     private readonly IMemoryStore store;
-    private readonly MemoryMcpOptions options;
+    private readonly IOptionsMonitor<MemoryMcpOptions> optionsMonitor;
     private readonly ILogger<MemoryService> logger;
 
     public MemoryService(
         IChunkingService chunking,
         IEmbeddingService embedding,
         IMemoryStore store,
-        IOptions<MemoryMcpOptions> options,
+        IOptionsMonitor<MemoryMcpOptions> optionsMonitor,
         ILogger<MemoryService> logger)
     {
         this.chunking = chunking;
         this.embedding = embedding;
         this.store = store;
-        this.options = options.Value;
+        this.optionsMonitor = optionsMonitor;
         this.logger = logger;
     }
 
@@ -38,16 +40,18 @@ public class MemoryService : IMemoryService
             throw new ArgumentException("Content cannot be empty.", nameof(content));
         }
 
+        // Read current options on each call so runtime changes take effect immediately.
+        var currentOptions = this.optionsMonitor.CurrentValue;
         float[]? contentVector = null;
 
         // Duplicate guard: check for near-identical existing memories
-        if (!force && this.options.DuplicateThreshold > 0)
+        if (!force && currentOptions.DuplicateThreshold > 0)
         {
             contentVector = await this.embedding.EmbedAsync(content, cancellationToken);
             var similar = await this.store.SearchAsync(
                 contentVector,
-                limit: this.options.DuplicateSearchLimit,
-                minScore: this.options.DuplicateThreshold,
+                limit: currentOptions.DuplicateSearchLimit,
+                minScore: currentOptions.DuplicateThreshold,
                 tags: null, // search across all tags
                 cancellationToken);
 
@@ -62,7 +66,7 @@ public class MemoryService : IMemoryService
                 return new IngestResult
                 {
                     Success = false,
-                    RejectionReason = $"Found {similar.Count} existing memories above similarity threshold ({this.options.DuplicateThreshold:F2}). " +
+                    RejectionReason = $"Found {similar.Count} existing memories above similarity threshold ({currentOptions.DuplicateThreshold:F2}). " +
                         $"Highest similarity: {highestScore:F3}. " +
                         "Use force=true to override, or update the existing memory instead.",
                     SimilarMemories = similar.Select(s => new SimilarMemory
