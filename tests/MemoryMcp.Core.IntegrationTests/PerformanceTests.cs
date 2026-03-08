@@ -66,6 +66,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
             this.chunkingService,
             this.embeddingService!,
             this.store,
+            Options.Create(this.options),
             NullLogger<MemoryService>.Instance);
     }
 
@@ -142,16 +143,17 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         this.output.WriteLine($"Ingesting short content ({content.Split(' ').Length} words)...");
 
         var sw = Stopwatch.StartNew();
-        var memoryId = await this.memoryService!.IngestAsync(content, "Short Memory", ["test"]);
+        var result = await this.memoryService!.IngestAsync(content, "Short Memory", ["test"], force: true);
         sw.Stop();
 
-        this.output.WriteLine($"Memory ID: {memoryId}");
+        this.output.WriteLine($"Memory ID: {result.MemoryId}");
         this.output.WriteLine($"Latency: {sw.ElapsedMilliseconds} ms");
         this.output.WriteLine($"  (includes: chunking + embedding + SQLite write + file write)");
         this.output.WriteLine($"Threshold: < 5000 ms");
         this.output.WriteLine(sw.ElapsedMilliseconds < 5000 ? "PASS" : "FAIL");
 
-        Assert.NotNull(memoryId);
+        Assert.True(result.Success);
+        Assert.NotNull(result.MemoryId);
 
         // Short content (single chunk) should ingest in under 5 seconds
         Assert.True(sw.ElapsedMilliseconds < 5000,
@@ -175,20 +177,21 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         this.output.WriteLine($"Chunk config: {this.options.ChunkSizeWords} words/chunk, {this.options.ChunkOverlapWords} words overlap");
 
         var sw = Stopwatch.StartNew();
-        var memoryId = await this.memoryService!.IngestAsync(content, "Long Memory", ["test", "performance"]);
+        var ingestResult = await this.memoryService!.IngestAsync(content, "Long Memory", ["test", "performance"], force: true);
         sw.Stop();
 
-        this.output.WriteLine($"Memory ID: {memoryId}");
+        this.output.WriteLine($"Memory ID: {ingestResult.MemoryId}");
         this.output.WriteLine($"Total latency: {sw.ElapsedMilliseconds} ms");
         this.output.WriteLine($"Per-chunk latency: {sw.ElapsedMilliseconds / (double)chunks.Count:F1} ms");
         this.output.WriteLine($"  (includes: chunking + {chunks.Count}x embedding + {chunks.Count}x SQLite write + file write)");
         this.output.WriteLine($"Threshold: < 60000 ms");
         this.output.WriteLine(sw.ElapsedMilliseconds < 60000 ? "PASS" : "FAIL");
 
-        Assert.NotNull(memoryId);
+        Assert.True(ingestResult.Success);
+        Assert.NotNull(ingestResult.MemoryId);
 
         // Verify it was chunked (>512 words should produce multiple chunks)
-        var result = await this.memoryService.GetAsync(memoryId);
+        var result = await this.memoryService.GetAsync(ingestResult.MemoryId);
         Assert.NotNull(result);
 
         // Long content ingest (multiple chunks + embeddings) should complete in under 60 seconds
@@ -214,7 +217,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         this.output.WriteLine($"Populating store with {memories.Length} memories...");
         foreach (var memory in memories)
         {
-            await this.memoryService!.IngestAsync(memory, tags: ["perf-test"]);
+            await this.memoryService!.IngestAsync(memory, tags: ["perf-test"], force: true);
         }
 
         string query = "container orchestration";
@@ -248,7 +251,8 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         this.SkipIfNoOllama();
 
         this.output.WriteLine("Ingesting test memory...");
-        var memoryId = await this.memoryService!.IngestAsync("Test content for get latency measurement.", "Latency Test");
+        var ingest = await this.memoryService!.IngestAsync("Test content for get latency measurement.", "Latency Test", force: true);
+        var memoryId = ingest.MemoryId!;
         this.output.WriteLine($"Memory ID: {memoryId}");
 
         this.output.WriteLine("Retrieving by ID...");
@@ -276,7 +280,8 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
         this.SkipIfNoOllama();
 
         this.output.WriteLine("Ingesting test memory...");
-        var memoryId = await this.memoryService!.IngestAsync("Test content for delete latency measurement.", "Delete Test");
+        var ingest = await this.memoryService!.IngestAsync("Test content for delete latency measurement.", "Delete Test", force: true);
+        var memoryId = ingest.MemoryId!;
         this.output.WriteLine($"Memory ID: {memoryId}");
 
         this.output.WriteLine("Deleting...");

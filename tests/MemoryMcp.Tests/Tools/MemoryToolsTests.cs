@@ -29,6 +29,19 @@ public class MemoryToolsTests
         this.tools = new MemoryTools(this.memoryService, options, logger);
     }
 
+    private static IngestResult SuccessResult(string? memoryId = null) => new()
+    {
+        Success = true,
+        MemoryId = memoryId ?? Guid.NewGuid().ToString(),
+    };
+
+    private static IngestResult RejectionResult(params SimilarMemory[] similarMemories) => new()
+    {
+        Success = false,
+        RejectionReason = $"Found {similarMemories.Length} existing memories above similarity threshold (0.90).",
+        SimilarMemories = [.. similarMemories],
+    };
+
     // --- IngestMemory Tests ---
 
     [Fact]
@@ -36,8 +49,8 @@ public class MemoryToolsTests
     {
         var expectedId = Guid.NewGuid().ToString();
         this.memoryService.IngestAsync(
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
-            .Returns(expectedId);
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(SuccessResult(expectedId));
 
         var result = await this.tools.IngestMemory("Test content", "Title");
 
@@ -49,8 +62,8 @@ public class MemoryToolsTests
     public async Task IngestMemory_WithJsonTags_ParsesTagsCorrectly()
     {
         this.memoryService.IngestAsync(
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
-            .Returns("id");
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(SuccessResult());
 
         await this.tools.IngestMemory("Content", tags: "[\"tag1\",\"tag2\"]");
 
@@ -58,6 +71,7 @@ public class MemoryToolsTests
             "Content",
             null,
             Arg.Is<List<string>?>(t => t != null && t.Count == 2 && t[0] == "tag1" && t[1] == "tag2"),
+            false,
             Arg.Any<CancellationToken>());
     }
 
@@ -65,8 +79,8 @@ public class MemoryToolsTests
     public async Task IngestMemory_WithInvalidJsonTags_TreatsAsingleTag()
     {
         this.memoryService.IngestAsync(
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
-            .Returns("id");
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(SuccessResult());
 
         await this.tools.IngestMemory("Content", tags: "simple-tag");
 
@@ -74,6 +88,7 @@ public class MemoryToolsTests
             "Content",
             null,
             Arg.Is<List<string>?>(t => t != null && t.Count == 1 && t[0] == "simple-tag"),
+            false,
             Arg.Any<CancellationToken>());
     }
 
@@ -81,8 +96,8 @@ public class MemoryToolsTests
     public async Task IngestMemory_WithNullTags_PassesNull()
     {
         this.memoryService.IngestAsync(
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
-            .Returns("id");
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(SuccessResult());
 
         await this.tools.IngestMemory("Content");
 
@@ -90,6 +105,7 @@ public class MemoryToolsTests
             "Content",
             null,
             null,
+            false,
             Arg.Any<CancellationToken>());
     }
 
@@ -97,8 +113,8 @@ public class MemoryToolsTests
     public async Task IngestMemory_WithEmptyTags_PassesNull()
     {
         this.memoryService.IngestAsync(
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
-            .Returns("id");
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(SuccessResult());
 
         await this.tools.IngestMemory("Content", tags: "  ");
 
@@ -106,6 +122,7 @@ public class MemoryToolsTests
             "Content",
             null,
             null,
+            false,
             Arg.Any<CancellationToken>());
     }
 
@@ -113,7 +130,7 @@ public class MemoryToolsTests
     public async Task IngestMemory_OllamaError_ReturnsCleanErrorMessage()
     {
         this.memoryService.IngestAsync(
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>())
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException(
                 "Failed to connect to Ollama at http://localhost:11434.",
                 new HttpRequestException("Connection refused")));
@@ -122,6 +139,41 @@ public class MemoryToolsTests
 
         Assert.Contains("Error:", result);
         Assert.Contains("Failed to connect to Ollama", result);
+    }
+
+    [Fact]
+    public async Task IngestMemory_DuplicateDetected_ReturnsRejectionWithSimilarMemories()
+    {
+        var similarId = Guid.NewGuid().ToString();
+        this.memoryService.IngestAsync(
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(RejectionResult(
+                new SimilarMemory { MemoryId = similarId, Content = "Existing content", Title = "Existing", Score = 0.95f }));
+
+        var result = await this.tools.IngestMemory("New content");
+
+        Assert.Contains("existing memories above similarity threshold", result);
+        Assert.Contains(similarId, result);
+        Assert.Contains("Existing content", result);
+        Assert.Contains("0.9500", result);
+        Assert.DoesNotContain("Memory stored successfully", result);
+    }
+
+    [Fact]
+    public async Task IngestMemory_WithForceTrue_PassesForceToService()
+    {
+        this.memoryService.IngestAsync(
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(SuccessResult());
+
+        await this.tools.IngestMemory("Content", force: true);
+
+        await this.memoryService.Received(1).IngestAsync(
+            "Content",
+            null,
+            null,
+            true,
+            Arg.Any<CancellationToken>());
     }
 
     // --- GetMemory Tests ---

@@ -1,6 +1,8 @@
+using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Models;
 using MemoryMcp.Core.Storage;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MemoryMcp.Core.Services;
 
@@ -12,25 +14,66 @@ public class MemoryService : IMemoryService
     private readonly IChunkingService chunking;
     private readonly IEmbeddingService embedding;
     private readonly IMemoryStore store;
+    private readonly MemoryMcpOptions options;
     private readonly ILogger<MemoryService> logger;
 
     public MemoryService(
         IChunkingService chunking,
         IEmbeddingService embedding,
         IMemoryStore store,
+        IOptions<MemoryMcpOptions> options,
         ILogger<MemoryService> logger)
     {
         this.chunking = chunking;
         this.embedding = embedding;
         this.store = store;
+        this.options = options.Value;
         this.logger = logger;
     }
 
-    public async Task<string> IngestAsync(string content, string? title = null, List<string>? tags = null, CancellationToken cancellationToken = default)
+    public async Task<IngestResult> IngestAsync(string content, string? title = null, List<string>? tags = null, bool force = false, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(content))
         {
             throw new ArgumentException("Content cannot be empty.", nameof(content));
+        }
+
+        float[]? contentVector = null;
+
+        // Duplicate guard: check for near-identical existing memories
+        if (!force && this.options.DuplicateThreshold > 0)
+        {
+            contentVector = await this.embedding.EmbedAsync(content, cancellationToken);
+            var similar = await this.store.SearchAsync(
+                contentVector,
+                limit: this.options.DuplicateSearchLimit,
+                minScore: this.options.DuplicateThreshold,
+                tags: null, // search across all tags
+                cancellationToken);
+
+            if (similar.Count > 0)
+            {
+                var highestScore = similar[0].Score;
+                this.logger.LogWarning(
+                    "Duplicate guard rejected ingest: {Count} similar memories found (highest score: {Score:F3}).",
+                    similar.Count,
+                    highestScore);
+
+                return new IngestResult
+                {
+                    Success = false,
+                    RejectionReason = $"Found {similar.Count} existing memories above similarity threshold ({this.options.DuplicateThreshold:F2}). " +
+                        $"Highest similarity: {highestScore:F3}. " +
+                        "Use force=true to override, or update the existing memory instead.",
+                    SimilarMemories = similar.Select(s => new SimilarMemory
+                    {
+                        MemoryId = s.MemoryId,
+                        Title = s.Title,
+                        Content = s.Content,
+                        Score = s.Score,
+                    }).ToList(),
+                };
+            }
         }
 
         var memoryId = Guid.NewGuid().ToString();
@@ -41,9 +84,17 @@ public class MemoryService : IMemoryService
         var chunkInfos = this.chunking.Chunk(content);
         this.logger.LogDebug("Memory {MemoryId}: content split into {ChunkCount} chunks.", memoryId, chunkInfos.Count);
 
-        // Embed all chunks in batch
-        var chunkTexts = chunkInfos.Select(c => c.Text).ToList();
-        var vectors = await this.embedding.EmbedBatchAsync(chunkTexts, cancellationToken);
+        // Embed chunks. Optimization: reuse the embedding from the dedup check for single-chunk content.
+        IReadOnlyList<float[]> vectors;
+        if (chunkInfos.Count == 1 && contentVector is not null)
+        {
+            vectors = [contentVector];
+        }
+        else
+        {
+            var chunkTexts = chunkInfos.Select(c => c.Text).ToList();
+            vectors = await this.embedding.EmbedBatchAsync(chunkTexts, cancellationToken);
+        }
 
         // Build chunk records
         var chunks = chunkInfos.Select(ci => new ChunkRecord
@@ -62,7 +113,7 @@ public class MemoryService : IMemoryService
         await this.store.StoreMemoryAsync(memoryId, content, chunks, vectors.ToList(), cancellationToken);
 
         this.logger.LogInformation("Ingested memory {MemoryId} with {ChunkCount} chunks.", memoryId, chunks.Count);
-        return memoryId;
+        return new IngestResult { Success = true, MemoryId = memoryId };
     }
 
     public async Task<MemoryResult?> GetAsync(string memoryId, CancellationToken cancellationToken = default)

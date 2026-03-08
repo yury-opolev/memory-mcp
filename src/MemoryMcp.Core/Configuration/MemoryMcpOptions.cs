@@ -50,6 +50,19 @@ public class MemoryMcpOptions
     public int SearchMaxContentLength { get; set; } = 1800;
 
     /// <summary>
+    /// Minimum cosine similarity score (0.0-1.0) at which a new memory is
+    /// considered a duplicate of an existing one. Set to 0 to disable the
+    /// duplicate guard entirely. Default: 0.90.
+    /// </summary>
+    public float DuplicateThreshold { get; set; } = 0.90f;
+
+    /// <summary>
+    /// Maximum number of similar memories to return when the duplicate guard
+    /// rejects an ingest. Default: 5.
+    /// </summary>
+    public int DuplicateSearchLimit { get; set; } = 5;
+
+    /// <summary>
     /// Ollama embedding provider configuration.
     /// </summary>
     public OllamaOptions Ollama { get; set; } = new();

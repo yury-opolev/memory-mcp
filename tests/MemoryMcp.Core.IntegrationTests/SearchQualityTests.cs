@@ -106,14 +106,15 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
             this.chunkingService,
             this.embeddingService!,
             this.store,
+            Options.Create(this.options),
             NullLogger<MemoryService>.Instance);
 
-        // Ingest all golden memories
+        // Ingest all golden memories (force=true to bypass dedup guard for test seeding)
         this.output.WriteLine($"Ingesting {GoldenMemories.Length} golden memories...");
         foreach (var (content, title, tags) in GoldenMemories)
         {
-            var id = await this.memoryService.IngestAsync(content, title, tags);
-            this.output.WriteLine($"  Ingested \"{title}\" (id: {id}, tags: [{string.Join(", ", tags)}])");
+            var result = await this.memoryService.IngestAsync(content, title, tags, force: true);
+            this.output.WriteLine($"  Ingested \"{title}\" (id: {result.MemoryId}, tags: [{string.Join(", ", tags)}])");
         }
         this.output.WriteLine("");
     }

@@ -10,13 +10,17 @@ public interface IMemoryService
 {
     /// <summary>
     /// Ingests a new memory: chunks the content, embeds each chunk, and stores everything.
+    /// When <paramref name="force"/> is false (default), performs a similarity check first
+    /// and rejects the ingest if any near-duplicates exist above the configured threshold.
     /// </summary>
     /// <param name="content">The full memory content text.</param>
     /// <param name="title">Optional short title/label.</param>
     /// <param name="tags">Optional tags for categorization.</param>
+    /// <param name="force">If true, bypass the duplicate check and always store.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The generated memory ID.</returns>
-    Task<string> IngestAsync(string content, string? title = null, List<string>? tags = null, CancellationToken cancellationToken = default);
+    /// <returns>An <see cref="IngestResult"/> indicating success or duplicate rejection
+    /// with details of all similar memories found.</returns>
+    Task<IngestResult> IngestAsync(string content, string? title = null, List<string>? tags = null, bool force = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Retrieves a memory by its ID, including full content.

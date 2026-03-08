@@ -28,18 +28,43 @@ public class MemoryTools
     }
 
     [McpServerTool(Name = "ingest_memory")]
-    [Description("Store a new memory. The content will be chunked, embedded, and indexed for semantic search.")]
+    [Description("Store a new memory. The content will be chunked, embedded, and indexed for semantic search. " +
+        "If near-duplicate memories are detected, the ingest is rejected with details about the similar memories. " +
+        "Use force=true to bypass the duplicate check.")]
     public async Task<string> IngestMemory(
         [Description("The full text content to store as a memory.")] string content,
         [Description("Optional short title or label for the memory.")] string? title = null,
         [Description("Optional tags for categorization, as a JSON array of strings (e.g. [\"project\",\"notes\"]).")] string? tags = null,
+        [Description("If true, bypass the duplicate check and always store the memory.")] bool force = false,
         CancellationToken cancellationToken = default)
     {
         try
         {
             var tagList = ParseTags(tags);
-            var memoryId = await this.memoryService.IngestAsync(content, title, tagList, cancellationToken);
-            return $"Memory stored successfully. ID: {memoryId}";
+            var result = await this.memoryService.IngestAsync(content, title, tagList, force, cancellationToken);
+
+            if (result.Success)
+            {
+                return $"Memory stored successfully. ID: {result.MemoryId}";
+            }
+
+            // Duplicate guard rejected the ingest — format similar memories for the caller
+            var sb = new StringBuilder();
+            sb.AppendLine(result.RejectionReason);
+            sb.AppendLine();
+
+            foreach (var similar in result.SimilarMemories)
+            {
+                sb.AppendLine($"--- Similar Memory: {similar.MemoryId} (Score: {similar.Score:F4}) ---");
+                if (similar.Title is not null)
+                {
+                    sb.AppendLine($"Title: {similar.Title}");
+                }
+                sb.AppendLine(similar.Content);
+                sb.AppendLine();
+            }
+
+            return sb.ToString();
         }
         catch (InvalidOperationException ex) when (ex.InnerException is HttpRequestException or not null)
         {
