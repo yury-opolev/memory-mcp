@@ -73,6 +73,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_memory_id ON chunks(MemoryId);
             CREATE INDEX IF NOT EXISTS idx_chunks_tags ON chunks(Tags);
+            CREATE INDEX IF NOT EXISTS idx_chunks_updated_at ON chunks(UpdatedAt);
             """;
         await createChunksCmd.ExecuteNonQueryAsync(cancellationToken);
 
