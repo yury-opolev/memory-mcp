@@ -1,6 +1,13 @@
 # memory-mcp
 
-A local MCP server that gives AI agents long-term semantic memory. It stores text as chunked, embedded vectors in SQLite and retrieves them via natural-language search.
+AI assistants forget everything between conversations. **memory-mcp** fixes that. It's a local server that gives any AI coding agent (Claude Code, Cursor, VS Code Copilot, OpenCode, etc.) the ability to **remember things** across sessions — your preferences, project context, decisions, anything you tell it to save. Memories are stored on your machine, never sent to the cloud, and found later using plain-English search. Think of it as a personal knowledge base that your AI assistant can read and write to.
+
+**Why use it:**
+- **Persistent memory** — your AI remembers what you told it yesterday, last week, or last month
+- **Semantic search** — find memories by meaning, not exact keywords ("how we handle auth" finds notes about authentication flow)
+- **Fully local** — all data stays on your machine, nothing leaves your network
+- **Works with any MCP client** — Claude Code, Cursor, VS Code, OpenCode, and more
+- **Optional encryption** — AES-256-GCM encryption at rest for sensitive data
 
 Built with .NET 10, [Ollama](https://ollama.com) for embeddings, and [sqlite-vec](https://github.com/asg017/sqlite-vec) for vector search. Communicates over stdio using the [Model Context Protocol](https://modelcontextprotocol.io).
 
@@ -38,58 +45,19 @@ When you search, the server embeds your query with the same model, runs a cosine
                          +-------------+
 ```
 
-## Prerequisites
+## Quick Install
 
-### .NET 10 SDK
+The install script builds the server, checks for Ollama, pulls the embedding model, and prints the config snippet you need to paste into your MCP client. One command does everything.
 
-Download from [dot.net](https://dot.net/download).
-
-### Ollama
-
-[Ollama](https://ollama.com) runs open-source AI models locally. This project uses it solely for generating text embeddings -- it does not use an LLM for chat.
-
-**Install Ollama:**
-
-| Platform | Command |
-|----------|---------|
-| macOS | `brew install ollama` or download from [ollama.com/download](https://ollama.com/download) |
-| Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
-| Windows | Download from [ollama.com/download](https://ollama.com/download) |
-
-**Start the Ollama service:**
-
-```sh
-ollama serve
-```
-
-Ollama listens on `http://localhost:11434` by default.
-
-**Pull the embedding model:**
-
-```sh
-ollama pull qwen3-embedding:0.6b
-```
-
-This downloads the Qwen3 embedding model (~0.6B parameters, ~500 MB). It produces 1024-dimensional vectors suitable for semantic similarity. You can use a different embedding model by changing the configuration (see [Configuration](#configuration)).
-
-## Getting Started
-
-### Quick Start (Helper Scripts)
-
-Helper scripts automate setup and running for both Linux/macOS and Windows.
+**Prerequisites:** [.NET 10 SDK](https://dot.net/download) and [Ollama](https://ollama.com/download).
 
 **Linux / macOS:**
 
 ```sh
 git clone https://github.com/yury-opolev/memory-mcp.git
 cd memory-mcp
-
-# Install dependencies, build, and pull the embedding model
-chmod +x scripts/setup.sh scripts/run.sh
-./scripts/setup.sh
-
-# Start the server
-./scripts/run.sh
+chmod +x scripts/install.sh
+./scripts/install.sh
 ```
 
 **Windows (PowerShell):**
@@ -97,24 +65,93 @@ chmod +x scripts/setup.sh scripts/run.sh
 ```powershell
 git clone https://github.com/yury-opolev/memory-mcp.git
 cd memory-mcp
-
-# Install dependencies, build, and pull the embedding model
-.\scripts\setup.ps1
-
-# Start the server
-.\scripts\run.ps1
+.\scripts\install.ps1
 ```
 
-The setup script will:
+The install script will:
 1. Verify the .NET SDK is installed
-2. Restore NuGet packages and build the solution
+2. Build and publish the server to a standard location (`~/.local/share/memory-mcp` on Linux/macOS, `%LOCALAPPDATA%\memory-mcp` on Windows)
 3. Check if Ollama is installed and running
 4. Pull the default embedding model (`qwen3-embedding:0.6b`)
+5. Print ready-to-paste MCP configuration snippets for Claude Code, VS Code / Cursor, and OpenCode
+
+After the script finishes, just copy the config snippet into your MCP client and you're done.
+
+| Flag | Description |
+|------|-------------|
+| `--rebuild` / `-Rebuild` | Force a fresh build even if binaries already exist |
+| `--skip-ollama` / `-SkipOllama` | Skip Ollama checks and model pull |
+| `--data-encryption true` / `-DataEncryption $true` | Enable AES-256-GCM encryption at rest |
+
+### MCP Client Configuration
+
+The install script prints the exact config for your platform. Here are examples (replace the paths with the actual output from the script):
+
+**Claude Code** (`~/.claude.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "/home/you/.local/share/memory-mcp/bin/MemoryMcp",
+      "env": {
+        "MemoryMcp__DataDirectory": "/home/you/.local/share/memory-mcp/data"
+      }
+    }
+  }
+}
+```
+
+**VS Code / Cursor** (`.vscode/mcp.json` or user settings):
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "/home/you/.local/share/memory-mcp/bin/MemoryMcp",
+      "env": {
+        "MemoryMcp__DataDirectory": "/home/you/.local/share/memory-mcp/data"
+      }
+    }
+  }
+}
+```
+
+**OpenCode** (`opencode.jsonc`):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memory": {
+      "type": "local",
+      "command": ["/home/you/.local/share/memory-mcp/bin/MemoryMcp"],
+      "env": {
+        "MemoryMcp__DataDirectory": "/home/you/.local/share/memory-mcp/data"
+      },
+      "enabled": true
+    }
+  }
+}
+```
+
+### Ollama Setup
+
+[Ollama](https://ollama.com) runs open-source AI models locally. This project uses it solely for generating text embeddings — it does not use an LLM for chat. The install script handles pulling the model, but you need Ollama installed and running first.
+
+| Platform | Install |
+|----------|---------|
+| macOS | `brew install ollama` or download from [ollama.com/download](https://ollama.com/download) |
+| Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
+| Windows | Download from [ollama.com/download](https://ollama.com/download) |
+
+Start it with `ollama serve`. It listens on `http://localhost:11434` by default.
 
 ### Manual Setup
 
+If you prefer not to use the install script:
+
 ```sh
-# Clone and build
 git clone https://github.com/yury-opolev/memory-mcp.git
 cd memory-mcp
 dotnet build
@@ -129,42 +166,7 @@ dotnet run --project src/MemoryMcp
 
 ### Startup Health Check
 
-On startup, the server checks whether Ollama is reachable and whether the configured embedding model is available. If either check fails, the server logs a warning but **does not crash** -- it starts normally so that non-embedding tools (`get_memory`, `delete_memory`) remain available. Embedding-dependent tools (`ingest_memory`, `update_memory`, `search_memory`) return a clear error message if Ollama is unavailable at call time.
-
-The server communicates over stdin/stdout using the MCP protocol. It is designed to be launched as a subprocess by an MCP client (e.g. an AI coding assistant).
-
-### MCP Client Configuration
-
-After running `./scripts/run.sh` (or `.\scripts\run.ps1` on Windows), the published binary is at `publish/MemoryMcp` (or `publish\MemoryMcp.exe` on Windows). The run script prints the exact config snippet for your platform.
-
-**OpenCode** (`opencode.jsonc`):
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "memory": {
-      "type": "local",
-      "command": ["/path/to/memory-mcp/publish/MemoryMcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-**Claude Desktop / VS Code / Cursor** (`mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "memory": {
-      "command": "/path/to/memory-mcp/publish/MemoryMcp"
-    }
-  }
-}
-```
-
-Replace `/path/to/memory-mcp` with the actual path to your clone.
+On startup, the server checks whether Ollama is reachable and whether the configured embedding model is available. If either check fails, the server logs a warning but **does not crash** — it starts normally so that non-embedding tools (`get_memory`, `delete_memory`) remain available. Embedding-dependent tools (`ingest_memory`, `update_memory`, `search_memory`) return a clear error message if Ollama is unavailable at call time.
 
 ## MCP Tools
 
@@ -299,6 +301,9 @@ You can override this with the `DataDirectory` setting or the `MemoryMcp__DataDi
     "ChunkSizeWords": 512,
     "ChunkOverlapWords": 64,
     "SearchMaxContentLength": 1800,
+    "Encryption": {
+      "Enabled": false
+    },
     "Ollama": {
       "Endpoint": "http://localhost:11434",
       "Model": "qwen3-embedding:0.6b",
@@ -316,6 +321,7 @@ You can override this with the `DataDirectory` setting or the `MemoryMcp__DataDi
 | `ChunkSizeWords` | `512` | Words per chunk |
 | `ChunkOverlapWords` | `64` | Overlapping words between consecutive chunks |
 | `SearchMaxContentLength` | `1800` | Max characters per result in search output |
+| `Encryption.Enabled` | `false` | Enable AES-256-GCM encryption for stored content (DPAPI key store on Windows, command-line key on Linux/macOS) |
 | `Ollama.Endpoint` | `http://localhost:11434` | Ollama API URL |
 | `Ollama.Model` | `qwen3-embedding:0.6b` | Embedding model name (must be pulled in Ollama) |
 | `Ollama.Dimensions` | `1024` | Vector dimensions (must match model output) |
@@ -372,6 +378,7 @@ memory-mcp/
   MemoryMcp.slnx                     Solution file
 
   scripts/
+    install.sh / install.ps1         One-step install (build, publish, configure)
     setup.sh / setup.ps1             Setup scripts (restore, build, pull model)
     run.sh / run.ps1                 Publish + start server (--rebuild to force)
 
@@ -379,6 +386,13 @@ memory-mcp/
     MemoryMcp.Core/                  Core library (no MCP dependency)
       Configuration/
         MemoryMcpOptions.cs          Strongly-typed options
+      Security/
+        IContentEncryptor.cs         Encryption interface
+        AesGcmContentEncryptor.cs    AES-256-GCM implementation
+        IKeyStore.cs                 Key storage interface
+        DpapiKeyStore.cs             Windows DPAPI key store
+        CommandLineKeyStore.cs       Linux/macOS key store
+        KeyStoreFactory.cs           Platform-aware key store selection
       Models/
         ChunkRecord.cs               ChunkRecord, ChunkInfo, MemoryResult, SearchResult
       Services/
