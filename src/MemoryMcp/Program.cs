@@ -1,10 +1,21 @@
+using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Services;
 using MemoryMcp.Core.Storage;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+// Load user settings from data directory (survives rebuilds)
+var dataDir = builder.Configuration[$"{MemoryMcpOptions.SectionName}:DataDirectory"]
+    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "memory-mcp");
+var userSettings = Path.Combine(dataDir, "settings.json");
+if (File.Exists(userSettings))
+{
+    builder.Configuration.AddJsonFile(userSettings, optional: true, reloadOnChange: false);
+}
 
 // Register MemoryMcp.Core services (chunking, embedding, storage, memory service)
 builder.Services.AddMemoryMcpCore(builder.Configuration);

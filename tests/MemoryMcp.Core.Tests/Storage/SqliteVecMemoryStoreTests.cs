@@ -1,5 +1,6 @@
 using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Models;
+using MemoryMcp.Core.Security;
 using MemoryMcp.Core.Storage;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -31,7 +32,7 @@ public class SqliteVecMemoryStoreTests : IDisposable
             Ollama = new OllamaOptions { Dimensions = 4 }, // Small dims for testing
         });
         var logger = Substitute.For<ILogger<SqliteVecMemoryStore>>();
-        this.store = new SqliteVecMemoryStore(options, logger);
+        this.store = new SqliteVecMemoryStore(options, new NullContentEncryptor(), logger);
     }
 
     public void Dispose()

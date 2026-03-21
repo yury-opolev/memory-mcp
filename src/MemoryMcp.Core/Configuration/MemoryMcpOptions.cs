@@ -63,6 +63,13 @@ public class MemoryMcpOptions
     public int DuplicateSearchLimit { get; set; } = 5;
 
     /// <summary>
+    /// Encryption configuration. When enabled, content files are encrypted with AES-256-GCM
+    /// and the SQLite database is encrypted with SQLCipher. The encryption key is managed
+    /// by the OS-native secret store (DPAPI on Windows, Keychain on macOS, libsecret on Linux).
+    /// </summary>
+    public EncryptionOptions Encryption { get; set; } = new();
+
+    /// <summary>
     /// Ollama embedding provider configuration.
     /// </summary>
     public OllamaOptions Ollama { get; set; } = new();
@@ -76,6 +83,19 @@ public class MemoryMcpOptions
     /// Full path to the memories content directory.
     /// </summary>
     public string MemoriesDirectory => Path.Combine(DataDirectory, MemoriesSubdirectory);
+}
+
+/// <summary>
+/// Configuration for data-at-rest encryption.
+/// </summary>
+public class EncryptionOptions
+{
+    /// <summary>
+    /// When true, content files are encrypted with AES-256-GCM and the SQLite database
+    /// is encrypted with SQLCipher. The encryption key is stored in the OS-native secret store.
+    /// Default: false.
+    /// </summary>
+    public bool Enabled { get; set; }
 }
 
 /// <summary>

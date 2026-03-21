@@ -1,6 +1,8 @@
+using System.Text;
 using System.Text.Json;
 using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Models;
+using MemoryMcp.Core.Security;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -11,35 +13,53 @@ namespace MemoryMcp.Core.Storage;
 /// SQLite + sqlite-vec implementation of IMemoryStore.
 /// Stores chunk metadata in a regular table, vectors in a sqlite-vec virtual table,
 /// and full content in files on disk.
+/// When encryption is enabled, the database is encrypted via SQLCipher and
+/// content files are encrypted via AES-256-GCM.
 /// </summary>
 public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 {
     private readonly MemoryMcpOptions options;
     private readonly ILogger<SqliteVecMemoryStore> logger;
+    private readonly IContentEncryptor contentEncryptor;
     private readonly SqliteConnection connection;
     private bool disposed;
 
-    public SqliteVecMemoryStore(IOptions<MemoryMcpOptions> options, ILogger<SqliteVecMemoryStore> logger)
+    public SqliteVecMemoryStore(
+        IOptions<MemoryMcpOptions> options,
+        IContentEncryptor contentEncryptor,
+        ILogger<SqliteVecMemoryStore> logger,
+        string? databaseKey = null)
     {
         this.options = options.Value;
+        this.contentEncryptor = contentEncryptor;
         this.logger = logger;
 
-        var connectionString = new SqliteConnectionStringBuilder
+        var builder = new SqliteConnectionStringBuilder
         {
             DataSource = this.options.DatabasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-        }.ToString();
+        };
 
-        this.connection = new SqliteConnection(connectionString);
+        if (databaseKey is not null)
+        {
+            builder.Password = databaseKey;
+        }
+
+        this.connection = new SqliteConnection(builder.ToString());
     }
 
     /// <summary>
     /// Constructor for testing with a pre-opened in-memory connection.
     /// </summary>
-    internal SqliteVecMemoryStore(SqliteConnection connection, MemoryMcpOptions options, ILogger<SqliteVecMemoryStore> logger)
+    internal SqliteVecMemoryStore(
+        SqliteConnection connection,
+        MemoryMcpOptions options,
+        IContentEncryptor contentEncryptor,
+        ILogger<SqliteVecMemoryStore> logger)
     {
         this.connection = connection;
         this.options = options;
+        this.contentEncryptor = contentEncryptor;
         this.logger = logger;
     }
 
@@ -98,9 +118,9 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             throw new ArgumentException("Chunks and vectors must have the same count.");
         }
 
-        // Write content file
+        // Write content file (encrypted if enabled)
         var contentPath = this.GetContentPath(memoryId);
-        await File.WriteAllTextAsync(contentPath, content, cancellationToken);
+        await this.WriteContentFileAsync(contentPath, content, cancellationToken);
 
         using var transaction = this.connection.BeginTransaction();
         try
@@ -176,7 +196,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         var createdAt = DateTimeOffset.Parse(reader.GetString(2));
         var updatedAt = DateTimeOffset.Parse(reader.GetString(3));
 
-        // Read content from file
+        // Read content from file (decrypted if enabled)
         var contentPath = this.GetContentPath(memoryId);
         if (!File.Exists(contentPath))
         {
@@ -184,7 +204,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             return null;
         }
 
-        var content = await File.ReadAllTextAsync(contentPath, cancellationToken);
+        var content = await this.ReadContentFileAsync(contentPath, cancellationToken);
 
         return new MemoryResult
         {
@@ -336,13 +356,13 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             .Take(limit)
             .ToList();
 
-        // Load content for each result
+        // Load content for each result (decrypted if enabled)
         foreach (var result in topResults)
         {
             var contentPath = this.GetContentPath(result.MemoryId);
             if (File.Exists(contentPath))
             {
-                result.Content = await File.ReadAllTextAsync(contentPath, cancellationToken);
+                result.Content = await this.ReadContentFileAsync(contentPath, cancellationToken);
             }
         }
 
@@ -380,6 +400,20 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
     private string GetContentPath(string memoryId)
         => Path.Combine(this.options.MemoriesDirectory, $"{memoryId}.memory.data");
+
+    private async Task WriteContentFileAsync(string path, string content, CancellationToken cancellationToken)
+    {
+        var plainBytes = Encoding.UTF8.GetBytes(content);
+        var outputBytes = this.contentEncryptor.Encrypt(plainBytes);
+        await File.WriteAllBytesAsync(path, outputBytes, cancellationToken);
+    }
+
+    private async Task<string> ReadContentFileAsync(string path, CancellationToken cancellationToken)
+    {
+        var fileBytes = await File.ReadAllBytesAsync(path, cancellationToken);
+        var plainBytes = this.contentEncryptor.Decrypt(fileBytes);
+        return Encoding.UTF8.GetString(plainBytes);
+    }
 
     public void Dispose()
     {

@@ -1,5 +1,6 @@
 using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Models;
+using MemoryMcp.Core.Security;
 using MemoryMcp.Core.Services;
 using MemoryMcp.Core.Storage;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -99,6 +100,7 @@ public class SearchQualityTests : IAsyncLifetime, IDisposable
 
         this.store = new SqliteVecMemoryStore(
             Options.Create(this.options),
+            new NullContentEncryptor(),
             NullLogger<SqliteVecMemoryStore>.Instance);
         await this.store.InitializeAsync();
 
