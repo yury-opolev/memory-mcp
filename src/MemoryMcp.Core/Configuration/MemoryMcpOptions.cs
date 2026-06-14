@@ -118,4 +118,12 @@ public class OllamaOptions
     /// Must match the model's output dimensions (or a supported MRL dimension).
     /// </summary>
     public int Dimensions { get; set; } = 1024;
+
+    /// <summary>
+    /// Optional Bearer API key for authenticated (remote) Ollama endpoints.
+    /// When non-null and non-empty, every outgoing request will include an
+    /// <c>Authorization: Bearer &lt;key&gt;</c> header.
+    /// Leave null for unauthenticated local Ollama instances.
+    /// </summary>
+    public string? ApiKey { get; set; }
 }

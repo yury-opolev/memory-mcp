@@ -1,7 +1,6 @@
 using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Services;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace MemoryMcp.Core.IntegrationTests;
@@ -22,11 +21,10 @@ public class EmbeddingQualityTests : IDisposable
     {
         this.output = output;
         this.options = TestOptionsHelper.CreateOptions();
-        var optionsWrapper = Options.Create(this.options);
 
         try
         {
-            this.embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
+            this.embeddingService = new OllamaEmbeddingService(new StaticOptionsMonitor<MemoryMcpOptions>(this.options), NullLogger<OllamaEmbeddingService>.Instance);
             // Quick connectivity check
             this.embeddingService.EmbedAsync("test").GetAwaiter().GetResult();
             this.ollamaAvailable = true;

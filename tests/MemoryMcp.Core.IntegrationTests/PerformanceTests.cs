@@ -37,7 +37,7 @@ public class PerformanceTests : IAsyncLifetime, IDisposable
 
         try
         {
-            this.embeddingService = new OllamaEmbeddingService(optionsWrapper, NullLogger<OllamaEmbeddingService>.Instance);
+            this.embeddingService = new OllamaEmbeddingService(new StaticOptionsMonitor<MemoryMcpOptions>(this.options), NullLogger<OllamaEmbeddingService>.Instance);
             this.embeddingService.EmbedAsync("warmup").GetAwaiter().GetResult();
             this.ollamaAvailable = true;
             this.output.WriteLine($"Ollama connected at {this.options.Ollama.Endpoint}");
