@@ -24,6 +24,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     private readonly SqliteConnection connection;
     private bool disposed;
 
+    private const string TagsMatchFunction = "memory_tags_match";
+
     public SqliteVecMemoryStore(
         IOptions<MemoryMcpOptions> options,
         IContentEncryptor contentEncryptor,
@@ -83,6 +85,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             secureDeleteCmd.CommandText = "PRAGMA secure_delete = ON;";
             await secureDeleteCmd.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        this.connection.CreateFunction<string?, string, bool>(TagsMatchFunction, TagsMatch, isDeterministic: true);
 
         // Create chunks metadata table
         using var createChunksCmd = this.connection.CreateCommand();
@@ -365,66 +369,56 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
     public async Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default)
     {
-        // Query sqlite-vec for nearest neighbors
-        // Fetch more than limit to account for grouping by MemoryId and filtering
-        int fetchLimit = limit * 10;
-
+        // Exact (brute-force) cosine scan over every chunk. Filters sit in the WHERE clause, so
+        // only matching chunks are scored and a selective filter cannot starve the result set.
+        var hasTagFilter = tags is { Count: > 0 };
         using var cmd = this.connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT v.ChunkKey, v.distance, c.Title, c.Tags, c.CreatedAt, c.UpdatedAt
-            FROM chunks_vec v
-            INNER JOIN chunks c ON c.MemoryId || ':' || c.ChunkIndex = v.ChunkKey
-            WHERE v.Vector MATCH @queryVector
-            AND k = @fetchLimit
-            ORDER BY v.distance
+        cmd.CommandText = $"""
+            SELECT c.MemoryId, vec_distance_cosine(v.Vector, @queryVector) AS distance,
+                   c.Title, c.Tags, c.CreatedAt, c.UpdatedAt
+            FROM chunks c
+            CROSS JOIN chunks_vec v
+            WHERE v.ChunkKey = c.MemoryId || ':' || c.ChunkIndex
+            {(hasTagFilter ? $"AND {TagsMatchFunction}(c.Tags, @tagFilter)" : string.Empty)}
+            ORDER BY distance
             """;
         cmd.Parameters.AddWithValue("@queryVector", VectorToBlob(queryVector));
-        cmd.Parameters.AddWithValue("@fetchLimit", fetchLimit);
+        if (hasTagFilter)
+        {
+            cmd.Parameters.AddWithValue("@tagFilter", JsonSerializer.Serialize(tags));
+        }
 
         var resultsByMemory = new Dictionary<string, SearchResult>();
 
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var chunkKey = reader.GetString(0);
-            var distance = reader.GetFloat(1);
-            var title = reader.IsDBNull(2) ? null : reader.GetString(2);
-            var chunkTags = JsonSerializer.Deserialize<List<string>>(reader.GetString(3)) ?? [];
-            var createdAt = DateTimeOffset.Parse(reader.GetString(4));
-            var updatedAt = DateTimeOffset.Parse(reader.GetString(5));
+            var memoryId = reader.GetString(0);
 
-            var (parsedMemoryId, _) = ParseChunkKey(chunkKey);
+            // Rows arrive best-first, so the first row of a memory is its best chunk.
+            // A NULL distance means an unscorable (zero) vector.
+            if (resultsByMemory.ContainsKey(memoryId) || reader.IsDBNull(1))
+            {
+                continue;
+            }
 
-            // sqlite-vec with cosine metric returns distance in [0, 2] (0 = identical, 2 = opposite)
-            // Convert to similarity score: similarity = 1 - distance (range: 1 to -1)
-            float score = 1.0f - distance;
-
-            // Apply minimum score filter
+            // Cosine distance is in [0, 2]; similarity = 1 - distance is in [-1, 1].
+            float score = 1.0f - reader.GetFloat(1);
             if (minScore.HasValue && score < minScore.Value)
             {
                 continue;
             }
 
-            // Apply tag filter: memory must have at least one of the requested tags
-            if (tags is { Count: > 0 } && !tags.Any(t => chunkTags.Contains(t, StringComparer.OrdinalIgnoreCase)))
+            resultsByMemory[memoryId] = new SearchResult
             {
-                continue;
-            }
-
-            // Group by memory: keep the best score per memory
-            if (!resultsByMemory.TryGetValue(parsedMemoryId, out var existing) || score > existing.Score)
-            {
-                resultsByMemory[parsedMemoryId] = new SearchResult
-                {
-                    MemoryId = parsedMemoryId,
-                    Title = title,
-                    Content = string.Empty, // Will be filled below
-                    Tags = chunkTags,
-                    CreatedAt = createdAt,
-                    UpdatedAt = updatedAt,
-                    Score = score,
-                };
-            }
+                MemoryId = memoryId,
+                Title = reader.IsDBNull(2) ? null : reader.GetString(2),
+                Content = string.Empty, // Will be filled below
+                Tags = JsonSerializer.Deserialize<List<string>>(reader.GetString(3)) ?? [],
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(4)),
+                UpdatedAt = DateTimeOffset.Parse(reader.GetString(5)),
+                Score = score,
+            };
         }
 
         // Sort by score descending, take top limit
@@ -469,10 +463,21 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     private static string FormatChunkKey(string memoryId, int chunkIndex)
         => $"{memoryId}:{chunkIndex}";
 
-    private static (string MemoryId, int ChunkIndex) ParseChunkKey(string chunkKey)
+    /// <summary>
+    /// SQL function <c>memory_tags_match(chunkTagsJson, filterJson)</c>: true when the chunk shares at
+    /// least one tag with the filter. Case-insensitive like <see cref="StringComparer.OrdinalIgnoreCase"/>,
+    /// which SQLite's ASCII-only NOCASE cannot provide for non-Latin tags.
+    /// </summary>
+    private static bool TagsMatch(string? chunkTagsJson, string filterJson)
     {
-        var lastColon = chunkKey.LastIndexOf(':');
-        return (chunkKey[..lastColon], int.Parse(chunkKey[(lastColon + 1)..]));
+        if (string.IsNullOrEmpty(chunkTagsJson))
+        {
+            return false;
+        }
+
+        var chunkTags = JsonSerializer.Deserialize<List<string>>(chunkTagsJson) ?? [];
+        var filter = JsonSerializer.Deserialize<List<string>>(filterJson) ?? [];
+        return filter.Any(t => chunkTags.Contains(t, StringComparer.OrdinalIgnoreCase));
     }
 
     private string GetContentPath(string memoryId)

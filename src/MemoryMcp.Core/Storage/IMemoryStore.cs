@@ -49,8 +49,9 @@ public interface IMemoryStore
     Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Searches for the most similar chunks using vector similarity.
-    /// Returns results grouped by memory ID with the best score per memory.
+    /// Exact cosine search: scores every chunk that passes the filters (filters are applied before
+    /// scoring, so any filter keeps exact recall) and returns memories grouped by ID with the best
+    /// chunk score per memory. Ranking is always pure vector similarity.
     /// </summary>
     /// <param name="queryVector">The query embedding vector.</param>
     /// <param name="limit">Maximum number of unique memories to return.</param>
