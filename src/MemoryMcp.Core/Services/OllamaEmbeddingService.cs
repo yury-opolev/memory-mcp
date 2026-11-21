@@ -196,9 +196,22 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
         return results[0];
     }
 
-    public async Task<IReadOnlyList<float[]>> EmbedBatchAsync(
+    /// <summary>Embeds texts; an input beyond num_ctx is truncated by Ollama (memory contents may be long).</summary>
+    public Task<IReadOnlyList<float[]>> EmbedBatchAsync(
         IEnumerable<string> texts,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        this.EmbedCoreAsync(texts, strict: false, cancellationToken);
+
+    /// <summary>Embeds texts with truncate=false: an input beyond num_ctx fails instead of being embedded cut.</summary>
+    public Task<IReadOnlyList<float[]>> EmbedBatchStrictAsync(
+        IEnumerable<string> texts,
+        CancellationToken cancellationToken = default) =>
+        this.EmbedCoreAsync(texts, strict: true, cancellationToken);
+
+    private async Task<IReadOnlyList<float[]>> EmbedCoreAsync(
+        IEnumerable<string> texts,
+        bool strict,
+        CancellationToken cancellationToken)
     {
         var textList = texts.ToList();
         if (textList.Count == 0)
@@ -217,13 +230,13 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
         var numCtx = this.options.CurrentValue.Ollama.NumCtx;
         try
         {
-            // truncate=false: an input longer than num_ctx fails loudly instead of being embedded cut.
+            // strict: truncate=false makes an input longer than num_ctx fail loudly instead of being embedded cut.
             var response = await current.EmbedAsync(
                 new EmbedRequest
                 {
                     Model = currentModel,
                     Input = textList,
-                    Truncate = false,
+                    Truncate = strict ? false : null,
                     Options = new RequestOptions { NumCtx = numCtx },
                 },
                 cancellationToken).ConfigureAwait(false);
