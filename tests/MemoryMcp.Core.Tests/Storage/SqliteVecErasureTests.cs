@@ -94,4 +94,55 @@ public sealed class SqliteVecErasureTests : IDisposable
 
         Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, marker), "deleted vector bytes are still in the database file");
     }
+
+    [Fact]
+    public async Task DeleteMemoryAsync_MetadataBytesAreErasedFromDatabaseFile()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.store.InitializeAsync(ct);
+        await this.store.StoreMemoryAsync("keep", "keep", SingleChunk("keep", "keep"), [Filler(1)], ct);
+
+        var victimId = $"victim-{Guid.NewGuid():N}";
+        var title = $"TITLE-MARKER-{Guid.NewGuid():N}";
+        await this.store.StoreMemoryAsync(victimId, "victim", SingleChunk(victimId, title), [Filler(2)], ct);
+        var titleBytes = System.Text.Encoding.UTF8.GetBytes(title);
+        var idBytes = System.Text.Encoding.UTF8.GetBytes(victimId);
+        Assert.True(DatabaseBytes.Contains(this.options.DatabasePath, titleBytes), "sanity: title must be visible before the delete");
+
+        Assert.True(await this.store.DeleteMemoryAsync(victimId, ct));
+
+        Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, titleBytes), "deleted title bytes are still in the database file");
+        Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, idBytes), "deleted memory id bytes are still in the database file");
+    }
+
+    [Fact]
+    public async Task DeleteMemoryAsync_WalMode_LeavesNoCopyInWal()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var walOptions = new MemoryMcpOptions
+        {
+            DataDirectory = this.tempDir,
+            DatabaseFileName = "erasure-wal.db",
+            Ollama = new OllamaOptions { Dimensions = Dimensions },
+        };
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={walOptions.DatabasePath}");
+        connection.Open();
+        using (var walCmd = connection.CreateCommand())
+        {
+            walCmd.CommandText = "PRAGMA journal_mode = WAL;";
+            walCmd.ExecuteNonQuery();
+        }
+
+        using var walStore = new SqliteVecMemoryStore(
+            connection, walOptions, new NullContentEncryptor(), Substitute.For<ILogger<SqliteVecMemoryStore>>());
+        await walStore.InitializeAsync(ct);
+        await walStore.StoreMemoryAsync("keep", "keep", SingleChunk("keep", "keep"), [Filler(1)], ct);
+        await walStore.StoreMemoryAsync("victim", "victim", SingleChunk("victim", "victim"), [MarkerVector], ct);
+        var marker = DatabaseBytes.Of(MarkerVector);
+        Assert.True(DatabaseBytes.Contains(walOptions.DatabasePath, marker), "sanity: marker must be visible before the delete");
+
+        Assert.True(await walStore.DeleteMemoryAsync("victim", ct));
+
+        Assert.False(DatabaseBytes.Contains(walOptions.DatabasePath, marker), "deleted vector bytes survive in the database or its WAL");
+    }
 }

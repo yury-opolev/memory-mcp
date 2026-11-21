@@ -76,6 +76,14 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
         var vecVersion = SqliteVecExtension.Load(this.connection);
 
+        // Overwrite deleted content with zeros so a deleted memory leaves no bytes in the file.
+        // The pragma is per connection, so it is set on every open.
+        using (var secureDeleteCmd = this.connection.CreateCommand())
+        {
+            secureDeleteCmd.CommandText = "PRAGMA secure_delete = ON;";
+            await secureDeleteCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         // Create chunks metadata table
         using var createChunksCmd = this.connection.CreateCommand();
         createChunksCmd.CommandText = """
@@ -272,6 +280,14 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         {
             transaction.Rollback();
             throw;
+        }
+
+        // No-op in the default rollback-journal mode; in WAL mode it moves the wiped pages
+        // into the database file and truncates the WAL so no pre-delete copy survives there.
+        using (var checkpointCmd = this.connection.CreateCommand())
+        {
+            checkpointCmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            await checkpointCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         // Delete content file
