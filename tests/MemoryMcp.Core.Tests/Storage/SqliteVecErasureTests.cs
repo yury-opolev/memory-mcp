@@ -163,6 +163,112 @@ public sealed class SqliteVecErasureTests : IDisposable
         Assert.Equal("live", Assert.Single(results).MemoryId);
     }
 
+    [Fact]
+    public async Task InitializeAsync_OldWriterDeletedSinceTheLastOpen_RebuildsAgain()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.store.InitializeAsync(ct);
+        await this.store.StoreMemoryAsync("keep", "keep", SingleChunk("keep", "keep"), [Filler(1)], ct);
+        this.store.Dispose();
+
+        // A rolled-back image running sqlite-vec 0.1.7 deletes without wiping; its delete stamps the writer version.
+        PlantVectorResidue(this.options.DatabasePath);
+        SetLastDeleteWriter(this.options.DatabasePath, "v0.1.7-alpha.2.1");
+        var marker = DatabaseBytes.Of(MarkerVector);
+        Assert.True(DatabaseBytes.Contains(this.options.DatabasePath, marker), "sanity: residue must be visible before the reopen");
+
+        using var reopened = this.NewStore();
+        await reopened.InitializeAsync(ct);
+
+        Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, marker), "residue of the old writer survived the reopen");
+        Assert.Equal("keep", Assert.Single(await reopened.SearchAsync(Filler(1), limit: 5, cancellationToken: ct)).MemoryId);
+        Assert.Equal(CurrentVecVersion(this.options.DatabasePath), ReadLastDeleteWriter(this.options.DatabasePath));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_DatabaseWithoutWriterMeta_RebuildsOnceAndRecordsTheWriter()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.store.InitializeAsync(ct);
+        this.store.Dispose();
+
+        // Rebuilt by a release that did not record the writer version: an old image may have written since.
+        DropWriterMeta(this.options.DatabasePath);
+        PlantVectorResidue(this.options.DatabasePath);
+        var marker = DatabaseBytes.Of(MarkerVector);
+
+        using var reopened = this.NewStore();
+        await reopened.InitializeAsync(ct);
+
+        Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, marker), "residue survived although the writer was unknown");
+        Assert.Equal(CurrentVecVersion(this.options.DatabasePath), ReadLastDeleteWriter(this.options.DatabasePath));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_OnlyCurrentWritersDeleted_DoesNotRebuild()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.store.InitializeAsync(ct);
+        await this.store.StoreMemoryAsync("keep", "keep", SingleChunk("keep", "keep"), [Filler(1)], ct);
+        await this.store.StoreMemoryAsync("gone", "gone", SingleChunk("gone", "gone"), [Filler(2)], ct);
+        Assert.True(await this.store.DeleteMemoryAsync("gone", ct));
+        this.store.Dispose();
+        PlantVectorResidue(this.options.DatabasePath);
+
+        using var reopened = this.NewStore();
+        await reopened.InitializeAsync(ct);
+
+        Assert.True(DatabaseBytes.Contains(this.options.DatabasePath, DatabaseBytes.Of(MarkerVector)), "a needless rebuild ran on a database only current writers touched");
+    }
+
+    private SqliteVecMemoryStore NewStore() =>
+        new(Options.Create(this.options), new NullContentEncryptor(), Substitute.For<ILogger<SqliteVecMemoryStore>>());
+
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenRaw(string databasePath)
+    {
+        var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        SqliteVecExtension.Load(connection);
+        return connection;
+    }
+
+    private static void Execute(string databasePath, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var connection = OpenRaw(databasePath);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var (name, value) in parameters)
+        {
+            cmd.Parameters.AddWithValue(name, value);
+        }
+
+        cmd.ExecuteNonQuery();
+    }
+
+    private static void PlantVectorResidue(string databasePath) =>
+        Execute(databasePath, "INSERT INTO chunks_vec (ChunkKey, Vector) VALUES ('ghost:0', @v);", ("@v", DatabaseBytes.Of(MarkerVector)));
+
+    private static void SetLastDeleteWriter(string databasePath, string version) =>
+        Execute(databasePath, "UPDATE vec_writer_meta SET LastDeleteVecVersion = @v;", ("@v", version));
+
+    private static void DropWriterMeta(string databasePath) =>
+        Execute(databasePath, "DROP TRIGGER chunks_record_delete_writer; DROP TABLE vec_writer_meta;");
+
+    private static string? ReadLastDeleteWriter(string databasePath)
+    {
+        using var connection = OpenRaw(databasePath);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT LastDeleteVecVersion FROM vec_writer_meta;";
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private static string CurrentVecVersion(string databasePath)
+    {
+        using var connection = OpenRaw(databasePath);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT vec_version();";
+        return (string)cmd.ExecuteScalar()!;
+    }
     /// <summary>
     /// Builds a schema-version-0 database: one live memory plus one vector with no chunk row.
     /// The unreferenced vector stands in for residue left behind by sqlite-vec &lt; 0.1.9 deletes.

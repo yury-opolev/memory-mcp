@@ -121,7 +121,7 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
         createVecCmd.CommandText = this.CreateVectorTableSql;
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await this.RebuildLegacyVectorTableAsync(cancellationToken);
+        await this.RebuildLegacyVectorTableAsync(vecVersion, cancellationToken);
         await this.InitializeKeywordIndexAsync(cancellationToken);
 
         this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}, sqlite-vec: {VecVersion}",
@@ -140,19 +140,44 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
     /// only cleared a validity bit on DELETE, so the vectors of deleted memories may still sit in
     /// the old table. Copying the live vectors into a fresh table and vacuuming removes them.
     /// Vectors without a chunk row are unreachable by search and are dropped too.
+    /// <para>
+    /// A rolled-back image still runs the old library on the same file, and the schema version cannot
+    /// tell. Every delete from <c>chunks</c> therefore stamps <c>vec_version()</c> of the deleting
+    /// process into <c>vec_writer_meta</c> (the trigger lives in the file, so the old binary fires it
+    /// too). A stamp older than 0.1.9, or none at all, means an old writer may have deleted since the
+    /// last rebuild, so the rebuild runs again.
+    /// </para>
     /// </summary>
-    private async Task RebuildLegacyVectorTableAsync(CancellationToken cancellationToken)
+    private async Task RebuildLegacyVectorTableAsync(string vecVersion, CancellationToken cancellationToken)
     {
         const int VectorsRebuiltVersion = 1;
 
+        long userVersion;
         using (var versionCmd = this.connection.CreateCommand())
         {
             versionCmd.CommandText = "PRAGMA user_version;";
-            var userVersion = (long)(await versionCmd.ExecuteScalarAsync(cancellationToken))!;
-            if (userVersion >= VectorsRebuiltVersion)
-            {
-                return;
-            }
+            userVersion = (long)(await versionCmd.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        var lastDeleteWriter = await this.ReadLastDeleteWriterAsync(cancellationToken);
+        using (var metaCmd = this.connection.CreateCommand())
+        {
+            metaCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS vec_writer_meta (
+                    Id                   INTEGER PRIMARY KEY CHECK (Id = 1),
+                    LastDeleteVecVersion TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS chunks_record_delete_writer AFTER DELETE ON chunks
+                BEGIN
+                    INSERT OR REPLACE INTO vec_writer_meta (Id, LastDeleteVecVersion) VALUES (1, vec_version());
+                END;
+                """;
+            await metaCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (userVersion >= VectorsRebuiltVersion && lastDeleteWriter is not null && SqliteVecExtension.WipesDeletedVectors(lastDeleteWriter))
+        {
+            return;
         }
 
         using (var transaction = this.connection.BeginTransaction())
@@ -181,6 +206,14 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            using (var stampCmd = this.connection.CreateCommand())
+            {
+                stampCmd.Transaction = transaction;
+                stampCmd.CommandText = "INSERT OR REPLACE INTO vec_writer_meta (Id, LastDeleteVecVersion) VALUES (1, @version);";
+                stampCmd.Parameters.AddWithValue("@version", vecVersion);
+                await stampCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             transaction.Commit();
         }
 
@@ -191,6 +224,24 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
 
         this.logger.LogInformation("Rebuilt the vector table with sqlite-vec >= 0.1.9 and vacuumed {DatabasePath}.", this.options.DatabasePath);
+    }
+
+    private async Task<string?> ReadLastDeleteWriterAsync(CancellationToken cancellationToken)
+    {
+        using var cmd = this.connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT LastDeleteVecVersion FROM vec_writer_meta WHERE Id = 1
+            AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'chunks_record_delete_writer');
+            """;
+        try
+        {
+            return await cmd.ExecuteScalarAsync(cancellationToken) as string;
+        }
+        catch (SqliteException)
+        {
+            // No vec_writer_meta table yet: a database from before the writer stamp existed.
+            return null;
+        }
     }
 
     public async Task StoreMemoryAsync(string memoryId, string content, List<ChunkRecord> chunks, List<float[]> vectors, CancellationToken cancellationToken = default)

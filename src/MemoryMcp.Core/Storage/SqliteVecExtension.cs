@@ -41,6 +41,13 @@ internal static class SqliteVecExtension
         return path;
     }
 
+    /// <summary>True when a process running <paramref name="vecVersion"/> physically clears the vector bytes it deletes.</summary>
+    public static bool WipesDeletedVectors(string vecVersion)
+    {
+        var core = vecVersion.TrimStart('v').Split('-', 2)[0];
+        return Version.TryParse(core, out var parsed) && parsed >= MinimumVersion;
+    }
+
     /// <summary>Throws when <paramref name="vecVersion"/> (as returned by <c>vec_version()</c>) is too old.</summary>
     public static void EnsureSupported(string vecVersion)
     {
