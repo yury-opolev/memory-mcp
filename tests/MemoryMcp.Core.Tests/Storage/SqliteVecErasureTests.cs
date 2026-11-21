@@ -145,4 +145,67 @@ public sealed class SqliteVecErasureTests : IDisposable
 
         Assert.False(DatabaseBytes.Contains(walOptions.DatabasePath, marker), "deleted vector bytes survive in the database or its WAL");
     }
+
+    [Fact]
+    public async Task InitializeAsync_LegacyDatabase_RebuildsVectorTableWithoutUnreferencedVectors()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var live = new float[] { 1, 0, 0, 0, 0, 0, 0, 0 };
+        CreateLegacyDatabase(this.options.DatabasePath, live);
+        var marker = DatabaseBytes.Of(MarkerVector);
+        Assert.True(DatabaseBytes.Contains(this.options.DatabasePath, marker), "sanity: legacy residue must be visible before the rebuild");
+
+        await this.store.InitializeAsync(ct);
+
+        Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, marker), "legacy vector residue survived the rebuild");
+        Assert.Equal(1L, ReadUserVersion(this.options.DatabasePath));
+        var results = await this.store.SearchAsync(live, limit: 5, cancellationToken: ct);
+        Assert.Equal("live", Assert.Single(results).MemoryId);
+    }
+
+    /// <summary>
+    /// Builds a schema-version-0 database: one live memory plus one vector with no chunk row.
+    /// The unreferenced vector stands in for residue left behind by sqlite-vec &lt; 0.1.9 deletes.
+    /// </summary>
+    private static void CreateLegacyDatabase(string databasePath, float[] liveVector)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        SqliteVecExtension.Load(connection);
+
+        void Execute(string sql, params (string Name, object Value)[] parameters)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            foreach (var (name, value) in parameters)
+            {
+                cmd.Parameters.AddWithValue(name, value);
+            }
+
+            cmd.ExecuteNonQuery();
+        }
+
+        Execute("""
+            CREATE TABLE chunks (
+                MemoryId TEXT NOT NULL, ChunkIndex INTEGER NOT NULL, StartOffset INTEGER NOT NULL, Length INTEGER NOT NULL,
+                Title TEXT, Tags TEXT DEFAULT '[]', CreatedAt TEXT NOT NULL, UpdatedAt TEXT NOT NULL,
+                PRIMARY KEY (MemoryId, ChunkIndex));
+            """);
+        Execute($"CREATE VIRTUAL TABLE chunks_vec USING vec0(ChunkKey TEXT PRIMARY KEY, Vector float[{Dimensions}] distance_metric=cosine);");
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        Execute(
+            "INSERT INTO chunks VALUES ('live', 0, 0, 4, 'live', '[]', @now, @now);",
+            ("@now", now));
+        Execute("INSERT INTO chunks_vec (ChunkKey, Vector) VALUES ('live:0', @v);", ("@v", DatabaseBytes.Of(liveVector)));
+        Execute("INSERT INTO chunks_vec (ChunkKey, Vector) VALUES ('ghost:0', @v);", ("@v", DatabaseBytes.Of(MarkerVector)));
+    }
+
+    private static long ReadUserVersion(string databasePath)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=False");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "PRAGMA user_version;";
+        return (long)cmd.ExecuteScalar()!;
+    }
 }

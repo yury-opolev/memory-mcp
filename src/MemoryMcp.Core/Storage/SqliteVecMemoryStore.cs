@@ -106,16 +106,78 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
         // Create sqlite-vec virtual table for vectors
         using var createVecCmd = this.connection.CreateCommand();
-        createVecCmd.CommandText = $"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-                ChunkKey TEXT PRIMARY KEY,
-                Vector   float[{this.options.Ollama.Dimensions}] distance_metric=cosine
-            );
-            """;
+        createVecCmd.CommandText = this.CreateVectorTableSql;
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await this.RebuildLegacyVectorTableAsync(cancellationToken);
 
         this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}, sqlite-vec: {VecVersion}",
             this.options.DatabasePath, this.options.Ollama.Dimensions, vecVersion);
+    }
+
+    private string CreateVectorTableSql => $"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+            ChunkKey TEXT PRIMARY KEY,
+            Vector   float[{this.options.Ollama.Dimensions}] distance_metric=cosine
+        );
+        """;
+
+    /// <summary>
+    /// Schema version 1 means the vector table was rebuilt by sqlite-vec &gt;= 0.1.9. Older releases
+    /// only cleared a validity bit on DELETE, so the vectors of deleted memories may still sit in
+    /// the old table. Copying the live vectors into a fresh table and vacuuming removes them.
+    /// Vectors without a chunk row are unreachable by search and are dropped too.
+    /// </summary>
+    private async Task RebuildLegacyVectorTableAsync(CancellationToken cancellationToken)
+    {
+        const int VectorsRebuiltVersion = 1;
+
+        using (var versionCmd = this.connection.CreateCommand())
+        {
+            versionCmd.CommandText = "PRAGMA user_version;";
+            var userVersion = (long)(await versionCmd.ExecuteScalarAsync(cancellationToken))!;
+            if (userVersion >= VectorsRebuiltVersion)
+            {
+                return;
+            }
+        }
+
+        using (var transaction = this.connection.BeginTransaction())
+        {
+            string[] steps =
+            [
+                """
+                CREATE TEMP TABLE chunks_vec_rebuild AS
+                SELECT v.ChunkKey, v.Vector
+                FROM chunks c
+                CROSS JOIN chunks_vec v
+                WHERE v.ChunkKey = c.MemoryId || ':' || c.ChunkIndex;
+                """,
+                "DROP TABLE chunks_vec;",
+                this.CreateVectorTableSql,
+                "INSERT INTO chunks_vec (ChunkKey, Vector) SELECT ChunkKey, Vector FROM chunks_vec_rebuild;",
+                "DROP TABLE chunks_vec_rebuild;",
+                $"PRAGMA user_version = {VectorsRebuiltVersion};",
+            ];
+
+            foreach (var sql in steps)
+            {
+                using var cmd = this.connection.CreateCommand();
+                cmd.Transaction = transaction;
+                cmd.CommandText = sql;
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            transaction.Commit();
+        }
+
+        using (var vacuumCmd = this.connection.CreateCommand())
+        {
+            vacuumCmd.CommandText = "VACUUM;";
+            await vacuumCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        this.logger.LogInformation("Rebuilt the vector table with sqlite-vec >= 0.1.9 and vacuumed {DatabasePath}.", this.options.DatabasePath);
     }
 
     public async Task StoreMemoryAsync(string memoryId, string content, List<ChunkRecord> chunks, List<float[]> vectors, CancellationToken cancellationToken = default)
