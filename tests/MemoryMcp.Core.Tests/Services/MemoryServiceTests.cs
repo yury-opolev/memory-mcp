@@ -316,6 +316,36 @@ public class MemoryServiceTests
         await this.store.Received(1).SearchAsync(queryVector, 10, 0.5f, tags, Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task FindSimilarAsync_Text_EmbedsTextAndRunsUnfilteredVectorSearch()
+    {
+        var vector = new float[] { 0.1f, 0.2f, 0.3f, 0.4f };
+        var expected = new List<SearchResult> { new() { MemoryId = "m-1", Content = "c", Score = 0.8f } };
+        this.embedding.EmbedAsync("user likes cats", Arg.Any<CancellationToken>()).Returns(vector);
+        this.store.SearchAsync(vector, 5, 0.3f, null, Arg.Any<CancellationToken>()).Returns(expected);
+
+        var results = await this.service.FindSimilarAsync("user likes cats", 5, 0.3f, TestContext.Current.CancellationToken);
+
+        Assert.Same(expected, results);
+        await this.store.Received(1).SearchAsync(vector, 5, 0.3f, null, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task FindSimilarAsync_EmptyText_ThrowsArgumentException()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => this.service.FindSimilarAsync("  ", 5, 0.3f, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FindSimilarAsync_NonPositiveLimit_ThrowsBeforeEmbedding()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => this.service.FindSimilarAsync("text", 0, 0.3f, TestContext.Current.CancellationToken));
+
+        await this.embedding.DidNotReceive().EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     // --- New duplicate guard tests ---
 
     [Fact]

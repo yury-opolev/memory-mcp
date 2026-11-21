@@ -48,11 +48,10 @@ public class MemoryService : IMemoryService
         if (!force && currentOptions.DuplicateThreshold > 0)
         {
             contentVector = await this.embedding.EmbedAsync(content, cancellationToken);
-            var similar = await this.store.SearchAsync(
+            var similar = await this.FindSimilarAsync(
                 contentVector,
-                limit: currentOptions.DuplicateSearchLimit,
-                minScore: currentOptions.DuplicateThreshold,
-                tags: null, // search across all tags
+                currentOptions.DuplicateSearchLimit,
+                currentOptions.DuplicateThreshold,
                 cancellationToken);
 
             if (similar.Count > 0)
@@ -207,5 +206,27 @@ public class MemoryService : IMemoryService
 
         // Search
         return await this.store.SearchAsync(queryVector, limit, minScore, tags, cancellationToken);
+    }
+
+    public async Task<List<SearchResult>> FindSimilarAsync(string text, int limit, float minScore, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            throw new ArgumentException("Text cannot be empty.", nameof(text));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        var vector = await this.embedding.EmbedAsync(text, cancellationToken);
+        return await this.FindSimilarAsync(vector, limit, minScore, cancellationToken);
+    }
+
+    public Task<List<SearchResult>> FindSimilarAsync(float[] vector, int limit, float minScore, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(vector);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        // The store's vector search is an exact cosine scan; no tag filter, no keyword fusion.
+        return this.store.SearchAsync(vector, limit, minScore, tags: null, cancellationToken);
     }
 }

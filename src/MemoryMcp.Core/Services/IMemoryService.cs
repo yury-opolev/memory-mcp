@@ -59,4 +59,30 @@ public interface IMemoryService
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Search results ranked by similarity.</returns>
     Task<List<SearchResult>> SearchAsync(string query, int limit = 5, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Dense-only similarity lookup for threshold-based callers (duplicate guard, consolidation,
+        /// compaction, context injection). Embeds <paramref name="text"/> and returns up to
+        /// <paramref name="limit"/> memories whose best-chunk cosine similarity is at least
+        /// <paramref name="minScore"/>, best first, across all tags.
+        /// Unlike <see cref="SearchAsync"/>, which may later fuse keyword ranking, this method always
+        /// ranks by pure cosine similarity, so a threshold keeps its meaning.
+        /// </summary>
+        /// <param name="text">The text to compare against stored memories.</param>
+        /// <param name="limit">Maximum number of memories to return (must be positive).</param>
+        /// <param name="minScore">Minimum cosine similarity (-1.0 to 1.0).</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Similar memories ordered by descending cosine similarity.</returns>
+        Task<List<SearchResult>> FindSimilarAsync(string text, int limit, float minScore, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Same as <see cref="FindSimilarAsync(string, int, float, CancellationToken)"/> for an
+        /// already-computed embedding <paramref name="vector"/>.
+        /// </summary>
+        /// <param name="vector">The query embedding.</param>
+        /// <param name="limit">Maximum number of memories to return (must be positive).</param>
+        /// <param name="minScore">Minimum cosine similarity (-1.0 to 1.0).</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Similar memories ordered by descending cosine similarity.</returns>
+        Task<List<SearchResult>> FindSimilarAsync(float[] vector, int limit, float minScore, CancellationToken cancellationToken = default);
 }
