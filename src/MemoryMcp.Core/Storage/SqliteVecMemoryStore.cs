@@ -16,7 +16,7 @@ namespace MemoryMcp.Core.Storage;
 /// When encryption is enabled, the database is encrypted via SQLCipher and
 /// content files are encrypted via AES-256-GCM.
 /// </summary>
-public class SqliteVecMemoryStore : IMemoryStore, IDisposable
+public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
 {
     private readonly MemoryMcpOptions options;
     private readonly ILogger<SqliteVecMemoryStore> logger;
@@ -122,6 +122,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await this.RebuildLegacyVectorTableAsync(cancellationToken);
+        await this.InitializeKeywordIndexAsync(cancellationToken);
 
         this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}, sqlite-vec: {VecVersion}",
             this.options.DatabasePath, this.options.Ollama.Dimensions, vecVersion);
@@ -240,6 +241,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
                 await insertVecCmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            await this.IndexKeywordDocumentAsync(transaction, memoryId, chunks.Count > 0 ? chunks[0].Title : null, content, cancellationToken);
+
             transaction.Commit();
             this.logger.LogDebug("Stored memory {MemoryId} with {ChunkCount} chunks.", memoryId, chunks.Count);
         }
@@ -318,7 +321,22 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
 
         cmd.CommandText = $"UPDATE chunks SET {string.Join(", ", setClauses)} WHERE MemoryId = @memoryId";
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+        // The title is part of the keyword document: re-index it in the same transaction.
+        var contentPath = this.GetContentPath(memoryId);
+        var content = title is not null && this.KeywordIndexAvailable && File.Exists(contentPath)
+            ? await this.ReadContentFileAsync(contentPath, cancellationToken)
+            : null;
+        using var transaction = this.connection.BeginTransaction();
+        cmd.Transaction = transaction;
+        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        var replaced = content is not null && updated > 0
+            && await this.IndexKeywordDocumentAsync(transaction, memoryId, title, content, cancellationToken);
+        transaction.Commit();
+        if (replaced)
+        {
+            await this.PurgeDeletedKeywordEntriesAsync(cancellationToken);
+        }
     }
 
     public async Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default)
@@ -348,6 +366,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             deleteChunksCmd.Parameters.AddWithValue("@memoryId", memoryId);
             await deleteChunksCmd.ExecuteNonQueryAsync(cancellationToken);
 
+            await this.RemoveKeywordDocumentAsync(transaction, memoryId, cancellationToken);
+
             transaction.Commit();
         }
         catch
@@ -356,8 +376,10 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             throw;
         }
 
-        // No-op in the default rollback-journal mode; in WAL mode it moves the wiped pages
-        // into the database file and truncates the WAL so no pre-delete copy survives there.
+        // Rewrite the keyword index without the deleted entries, then (in WAL mode) move the wiped pages
+        // into the database file and truncate the WAL so no pre-delete copy survives there. The checkpoint
+        // is a no-op in the default rollback-journal mode.
+        await this.PurgeDeletedKeywordEntriesAsync(cancellationToken);
         using (var checkpointCmd = this.connection.CreateCommand())
         {
             checkpointCmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";

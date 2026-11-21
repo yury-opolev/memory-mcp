@@ -74,6 +74,30 @@ public interface IMemoryStore
     Task<List<SearchResult>> SearchDenseAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Why the keyword (FTS5 BM25) index cannot be used — e.g. the linked SQLite engine lacks FTS5
+    /// <c>contentless_delete</c> — or null when it is available.
+    /// </summary>
+    string? KeywordIndexUnavailableReason { get; }
+
+    /// <summary>
+    /// BM25 search of the keyword index (folded title and content of each memory) with
+    /// <paramref name="filter"/> applied before ranking. Empty when the index is unavailable.
+    /// </summary>
+    /// <param name="matchExpression">An FTS5 MATCH expression (see <see cref="Retrieval.KeywordQuery.Build"/>).</param>
+    /// <param name="limit">Maximum number of memories to return.</param>
+    /// <param name="filter">Tags and excluded ids.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Memories ordered by descending BM25 relevance.</returns>
+    Task<List<KeywordHit>> KeywordSearchAsync(string matchExpression, int limit, MemorySearchFilter filter, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Re-creates every keyword index row from the stored titles and content files (migration and
+    /// version changes). Returns the number of indexed memories; 0 when the index is unavailable.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task<int> RebuildKeywordIndexAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Checks whether a memory with the given ID exists.
     /// </summary>
     /// <param name="memoryId">The memory identifier.</param>
