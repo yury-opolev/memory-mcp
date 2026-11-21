@@ -24,10 +24,12 @@ public interface IEmbeddingService
     /// <summary>
     /// Like <see cref="EmbedBatchAsync"/>, but an input longer than the model's context window must fail
     /// (<see cref="EmbeddingInputTooLongException"/>) instead of being embedded truncated. Opt-in for callers
-    /// that need whole-text vectors; the default implementation falls back to <see cref="EmbedBatchAsync"/>.
+    /// that need whole-text vectors. The default implementation throws <see cref="NotSupportedException"/>:
+    /// an implementation that cannot detect over-long input must not silently fall back to truncating.
     /// </summary>
     Task<IReadOnlyList<float[]>> EmbedBatchStrictAsync(IEnumerable<string> texts, CancellationToken cancellationToken = default) =>
-        this.EmbedBatchAsync(texts, cancellationToken);
+        Task.FromException<IReadOnlyList<float[]>>(
+            new NotSupportedException($"{this.GetType().Name} does not support strict (non-truncating) batch embedding."));
 
         /// <summary>
         /// Embeds a search query, prefixed with <paramref name="instruction"/> in the Qwen3 format
