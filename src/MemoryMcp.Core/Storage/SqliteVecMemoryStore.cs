@@ -339,7 +339,62 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
     }
 
-    public async Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default)
+    public async Task<int> DeleteMemoriesAsync(IReadOnlyCollection<string> memoryIds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(memoryIds);
+        return await this.DeleteBatchAsync(memoryIds.Distinct(StringComparer.Ordinal).ToList(), cancellationToken);
+    }
+
+    public async Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default) =>
+        await this.DeleteBatchAsync([memoryId], cancellationToken) == 1;
+
+    /// <summary>
+    /// Deletes the memories one transaction each, then rewrites the keyword index without the deleted entries
+    /// and (in WAL mode) moves the wiped pages into the database file and truncates the WAL so no pre-delete
+    /// copy survives there; the checkpoint is a no-op in the default rollback-journal mode. The rewrite and
+    /// the checkpoint run once per batch, so a bulk delete stays linear while a single delete erases at once.
+    /// </summary>
+    private async Task<int> DeleteBatchAsync(IReadOnlyList<string> memoryIds, CancellationToken cancellationToken)
+    {
+        var deleted = new List<string>();
+        try
+        {
+            foreach (var memoryId in memoryIds)
+            {
+                if (await this.DeleteMemoryRowsAsync(memoryId, cancellationToken))
+                {
+                    deleted.Add(memoryId);
+                }
+            }
+        }
+        finally
+        {
+            if (deleted.Count > 0)
+            {
+                await this.PurgeDeletedKeywordEntriesAsync(cancellationToken);
+                using (var checkpointCmd = this.connection.CreateCommand())
+                {
+                    checkpointCmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                    await checkpointCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                foreach (var memoryId in deleted)
+                {
+                    var contentPath = this.GetContentPath(memoryId);
+                    if (File.Exists(contentPath))
+                    {
+                        File.Delete(contentPath);
+                    }
+
+                    this.logger.LogDebug("Deleted memory {MemoryId}.", memoryId);
+                }
+            }
+        }
+
+        return deleted.Count;
+    }
+
+    private async Task<bool> DeleteMemoryRowsAsync(string memoryId, CancellationToken cancellationToken)
     {
         // Check if exists
         if (!await this.ExistsAsync(memoryId, cancellationToken))
@@ -369,32 +424,13 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
             await this.RemoveKeywordDocumentAsync(transaction, memoryId, cancellationToken);
 
             transaction.Commit();
+            return true;
         }
         catch
         {
             transaction.Rollback();
             throw;
         }
-
-        // Rewrite the keyword index without the deleted entries, then (in WAL mode) move the wiped pages
-        // into the database file and truncate the WAL so no pre-delete copy survives there. The checkpoint
-        // is a no-op in the default rollback-journal mode.
-        await this.PurgeDeletedKeywordEntriesAsync(cancellationToken);
-        using (var checkpointCmd = this.connection.CreateCommand())
-        {
-            checkpointCmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-            await checkpointCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        // Delete content file
-        var contentPath = this.GetContentPath(memoryId);
-        if (File.Exists(contentPath))
-        {
-            File.Delete(contentPath);
-        }
-
-        this.logger.LogDebug("Deleted memory {MemoryId}.", memoryId);
-        return true;
     }
 
     public Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default) =>

@@ -49,6 +49,16 @@ public interface IMemoryStore
     Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Deletes many memories as one batch. The erasure guarantee of <see cref="DeleteMemoryAsync"/> holds
+    /// when the call returns, but the keyword index is rewritten and the WAL truncated once for the whole
+    /// batch instead of once per memory.
+    /// </summary>
+    /// <param name="memoryIds">The memory identifiers; unknown ones are skipped.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The number of memories that existed and were deleted.</returns>
+    Task<int> DeleteMemoriesAsync(IReadOnlyCollection<string> memoryIds, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Exact cosine search: scores every chunk that passes the filters (filters are applied before
     /// scoring, so any filter keeps exact recall) and returns memories grouped by ID with the best
     /// chunk score per memory. Ranking is always pure vector similarity.

@@ -29,6 +29,9 @@ public partial class SqliteVecMemoryStore
     /// <summary>Number of full keyword-index rebuilds run by this instance (observed by tests).</summary>
     internal int KeywordIndexRebuildCount { get; private set; }
 
+    /// <summary>Number of keyword-index optimize passes run after deletes or replacements (observed by tests).</summary>
+    internal int KeywordOptimizeCount { get; private set; }
+
     /// <inheritdoc />
     public string? KeywordIndexUnavailableReason => this.keywordIndexUnavailableReason;
 
@@ -278,6 +281,7 @@ public partial class SqliteVecMemoryStore
     {
         if (this.KeywordIndexAvailable)
         {
+            this.KeywordOptimizeCount++;
             await this.ExecuteAsync(null, "INSERT INTO memories_fts(memories_fts) VALUES('optimize');", cancellationToken);
         }
     }

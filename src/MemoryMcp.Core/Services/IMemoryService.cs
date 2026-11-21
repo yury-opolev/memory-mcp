@@ -50,6 +50,12 @@ public interface IMemoryService
     Task<bool> DeleteAsync(string memoryId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Deletes many memories as one batch (the keyword index is rewritten once, not per memory).
+    /// Returns the number deleted.
+    /// </summary>
+    Task<int> DeleteManyAsync(IReadOnlyCollection<string> memoryIds, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Searches memories by semantic similarity to the query text.
     /// </summary>
     /// <param name="query">The search query text.</param>

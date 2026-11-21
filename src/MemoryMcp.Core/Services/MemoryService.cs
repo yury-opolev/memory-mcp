@@ -194,6 +194,13 @@ public class MemoryService : IMemoryService
         return deleted;
     }
 
+    public async Task<int> DeleteManyAsync(IReadOnlyCollection<string> memoryIds, CancellationToken cancellationToken = default)
+    {
+        var deleted = await this.store.DeleteMemoriesAsync(memoryIds, cancellationToken);
+        this.logger.LogInformation("Deleted {Count} memories in one batch.", deleted);
+        return deleted;
+    }
+
     public async Task<List<SearchResult>> SearchAsync(string query, int limit = 5, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(query))
