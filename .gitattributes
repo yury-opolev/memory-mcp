@@ -8,3 +8,8 @@
 *.bash       text eol=lf
 Dockerfile   text eol=lf
 *.dockerfile text eol=lf
+
+# Vendored sqlite-vec native libraries (scripts/update-sqlite-vec.ps1): never touch line endings.
+*.dll   binary
+*.so    binary
+*.dylib binary
