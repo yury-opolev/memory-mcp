@@ -26,6 +26,9 @@ public partial class SqliteVecMemoryStore
 
     private string? keywordIndexUnavailableReason = "The memory store is not initialized.";
 
+    /// <summary>Number of full keyword-index rebuilds run by this instance (observed by tests).</summary>
+    internal int KeywordIndexRebuildCount { get; private set; }
+
     /// <inheritdoc />
     public string? KeywordIndexUnavailableReason => this.keywordIndexUnavailableReason;
 
@@ -115,6 +118,7 @@ public partial class SqliteVecMemoryStore
         }
 
         await this.ExecuteAsync(null, "INSERT INTO memories_fts(memories_fts) VALUES('optimize'); PRAGMA wal_checkpoint(TRUNCATE);", cancellationToken);
+        this.KeywordIndexRebuildCount++;
         this.logger.LogKeywordIndexRebuilt(indexed, missing);
         return indexed;
     }
@@ -160,10 +164,57 @@ public partial class SqliteVecMemoryStore
         cmd.CommandText = "SELECT Value FROM memory_meta WHERE Key = @key";
         cmd.Parameters.AddWithValue("@key", KeywordFingerprintKey);
         var stored = await cmd.ExecuteScalarAsync(cancellationToken) as string;
-        if (!string.Equals(stored, KeywordIndexFingerprint, StringComparison.Ordinal))
+        if (!string.Equals(stored, KeywordIndexFingerprint, StringComparison.Ordinal)
+            || await this.KeywordIndexDriftedAsync(cancellationToken))
         {
             await this.RebuildKeywordIndexAsync(cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Cheap startup consistency check. Writes made by code that does not maintain the index (an older
+    /// image after a rollback, a run on an engine without FTS5) leave map rows of deleted memories, memories
+    /// without a row, and FTS rows or tokens nobody maps to. A memory whose content file is missing can never
+    /// be indexed, so it does not count as drift.
+    /// </summary>
+    private async Task<bool> KeywordIndexDriftedAsync(CancellationToken cancellationToken)
+    {
+        async Task<long> Scalar(string sql)
+        {
+            using var cmd = this.connection.CreateCommand();
+            cmd.CommandText = sql;
+            return (long)(await cmd.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        const string OrphanMapSql = """
+            SELECT COUNT(*) FROM memories_fts_map m
+            WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.MemoryId = m.MemoryId AND c.ChunkIndex = 0)
+            """;
+        if (await Scalar(OrphanMapSql) > 0)
+        {
+            return true;
+        }
+
+        if (await Scalar("SELECT COUNT(*) FROM memories_fts") != await Scalar("SELECT COUNT(*) FROM memories_fts_map"))
+        {
+            return true;
+        }
+
+        using var unmappedCmd = this.connection.CreateCommand();
+        unmappedCmd.CommandText = """
+            SELECT c.MemoryId FROM chunks c
+            WHERE c.ChunkIndex = 0 AND NOT EXISTS (SELECT 1 FROM memories_fts_map m WHERE m.MemoryId = c.MemoryId)
+            """;
+        using var reader = await unmappedCmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (File.Exists(this.GetContentPath(reader.GetString(0))))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
