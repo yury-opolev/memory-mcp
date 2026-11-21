@@ -221,6 +221,24 @@ public sealed class SqliteVecErasureTests : IDisposable
         Assert.True(DatabaseBytes.Contains(this.options.DatabasePath, DatabaseBytes.Of(MarkerVector)), "a needless rebuild ran on a database only current writers touched");
     }
 
+    [Theory]
+    [InlineData("legacy-vec-0.1.7.db", 0L)]
+    [InlineData("rolled-back-vec-0.1.7.db", 1L)]
+    public async Task InitializeAsync_DatabaseDeletedFromBySqliteVec017_ErasesTheResidue(string fixture, long userVersionBefore)
+    {
+        // Fixtures are synthetic: a live vector plus a marker vector that sqlite-vec 0.1.7-alpha.2.1 inserted and then deleted.
+        var ct = TestContext.Current.CancellationToken;
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "Storage", "Fixtures", fixture), this.options.DatabasePath);
+        var marker = DatabaseBytes.Of(MarkerVector);
+        Assert.True(DatabaseBytes.Contains(this.options.DatabasePath, marker), "sanity: the old library must have left the deleted vector behind");
+        Assert.Equal(userVersionBefore, ReadUserVersion(this.options.DatabasePath));
+
+        await this.store.InitializeAsync(ct);
+
+        Assert.False(DatabaseBytes.Contains(this.options.DatabasePath, marker), "residue written by sqlite-vec 0.1.7 survived the rebuild");
+        Assert.Equal(1L, ReadUserVersion(this.options.DatabasePath));
+        Assert.Equal("live", Assert.Single(await this.store.SearchAsync([1, 0, 0, 0, 0, 0, 0, 0], limit: 5, cancellationToken: ct)).MemoryId);
+    }
     private SqliteVecMemoryStore NewStore() =>
         new(Options.Create(this.options), new NullContentEncryptor(), Substitute.For<ILogger<SqliteVecMemoryStore>>());
 
