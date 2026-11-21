@@ -120,6 +120,13 @@ public class OllamaOptions
     public int Dimensions { get; set; } = 1024;
 
     /// <summary>
+    /// Context window (<c>num_ctx</c>) sent with every embed request. Requests are sent with
+    /// <c>truncate=false</c>, so an input longer than this fails instead of being silently cut.
+    /// Default: 4096 (a 3,000-character chunk of digits or symbols stays below it).
+    /// </summary>
+    public int NumCtx { get; set; } = 4096;
+
+    /// <summary>
     /// Optional Bearer API key for authenticated (remote) Ollama endpoints.
     /// When non-null and non-empty, every outgoing request will include an
     /// <c>Authorization: Bearer &lt;key&gt;</c> header.

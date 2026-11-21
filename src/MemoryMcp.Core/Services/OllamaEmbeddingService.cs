@@ -1,9 +1,9 @@
 using System.Net.Http.Headers;
 using MemoryMcp.Core.Configuration;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OllamaSharp;
+using OllamaSharp.Models;
 using OllamaSharp.Models.Exceptions;
 
 namespace MemoryMcp.Core.Services;
@@ -214,15 +214,27 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
             currentModel = this.model;
         }
 
+        var numCtx = this.options.CurrentValue.Ollama.NumCtx;
         try
         {
-            IEmbeddingGenerator<string, Embedding<float>> generator = current;
-            var result = await generator.GenerateAsync(textList, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
+            // truncate=false: an input longer than num_ctx fails loudly instead of being embedded cut.
+            var response = await current.EmbedAsync(
+                new EmbedRequest
+                {
+                    Model = currentModel,
+                    Input = textList,
+                    Truncate = false,
+                    Options = new RequestOptions { NumCtx = numCtx },
+                },
+                cancellationToken).ConfigureAwait(false);
 
-            return result
-                .Select(e => e.Vector.ToArray())
-                .ToList();
+            if (response.Embeddings is null || response.Embeddings.Count != textList.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Ollama returned {response.Embeddings?.Count ?? 0} embeddings for {textList.Count} inputs.");
+            }
+
+            return response.Embeddings;
         }
         catch (HttpRequestException ex)
         {
@@ -232,6 +244,12 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
                 "Please ensure Ollama is installed and running. " +
                 "Install: https://ollama.com/download -- " +
                 $"Then run: ollama pull {currentModel}",
+                ex);
+        }
+        catch (OllamaException ex) when (ex.Message.Contains("context length", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new EmbeddingInputTooLongException(
+                $"An input exceeds the embedding context window (num_ctx={numCtx}) of model '{currentModel}'; it was not truncated.",
                 ex);
         }
         catch (OllamaException ex)
