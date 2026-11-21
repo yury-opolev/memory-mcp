@@ -45,7 +45,7 @@ public class MemoryService : IMemoryService
         float[]? contentVector = null;
 
         // Duplicate guard: check for near-identical existing memories
-        if (!force && currentOptions.DuplicateThreshold > 0)
+        if (!force && currentOptions.DuplicateThreshold > 0 && currentOptions.DuplicateSearchLimit > 0)
         {
             contentVector = await this.embedding.EmbedAsync(content, cancellationToken);
             var similar = await this.FindSimilarAsync(

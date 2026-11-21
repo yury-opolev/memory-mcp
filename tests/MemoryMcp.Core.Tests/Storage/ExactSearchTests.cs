@@ -26,6 +26,7 @@ public sealed class ExactSearchTests : IDisposable
     private readonly MemoryMcpOptions options;
     private readonly SqliteVecMemoryStore store;
     private readonly Dictionary<string, (List<float[]> Vectors, List<string> Tags)> seeded = [];
+    private readonly ILogger<SqliteVecMemoryStore> logger = Substitute.For<ILogger<SqliteVecMemoryStore>>();
 
     public ExactSearchTests()
     {
@@ -38,7 +39,7 @@ public sealed class ExactSearchTests : IDisposable
             Ollama = new OllamaOptions { Dimensions = Dimensions },
         };
         this.store = new SqliteVecMemoryStore(
-            Options.Create(this.options), new NullContentEncryptor(), Substitute.For<ILogger<SqliteVecMemoryStore>>());
+            Options.Create(this.options), new NullContentEncryptor(), this.logger);
     }
 
     public void Dispose()
@@ -67,6 +68,46 @@ public sealed class ExactSearchTests : IDisposable
         var expected = this.BruteForce(query, limit: 5, minScore: null, tags: ["rare"]);
         Assert.Equal(5, expected.Count);
         AssertSameRanking(expected, actual);
+    }
+
+    [Fact]
+    public async Task SearchAsync_Unfiltered_EqualsBruteForce()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.SeedAsync(memoryCount: 1000, tagsFor: i => i % 100 == 7 ? ["rare"] : ["common"], ct);
+        var rng = new Random(7);
+
+        for (int q = 0; q < 10; q++)
+        {
+            var query = ClusteredVector(rng, cluster: q % Clusters);
+
+            var actual = await this.store.SearchAsync(query, limit: 5, minScore: 0.5f, tags: null, ct);
+
+            var expected = this.BruteForce(query, limit: 5, minScore: 0.5f, tags: null);
+            Assert.Equal(5, expected.Count);
+            AssertSameRanking(expected, actual);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_ChunkCountAboveKnnCap_MatchesBruteForceAndLogsSlowPathOnce()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        this.logger.IsEnabled(Arg.Any<LogLevel>()).Returns(true);
+        await this.SeedAsync(memoryCount: 1000, tagsFor: i => i % 100 == 7 ? ["rare"] : ["common"], ct);
+        this.store.KnnMaxK = 500; // ~2,000 chunks are stored, so both paths run past the cap
+        var query = ClusteredVector(new Random(99), cluster: 3);
+
+        var filtered = await this.store.SearchAsync(query, limit: 5, minScore: null, tags: ["rare"], ct);
+        await this.store.SearchAsync(query, limit: 5, minScore: null, tags: ["rare"], ct);
+        var unfiltered = await this.store.SearchAsync(query, limit: 5, minScore: null, tags: null, ct);
+
+        AssertSameRanking(this.BruteForce(query, limit: 5, minScore: null, tags: ["rare"]), filtered);
+        AssertSameRanking(this.BruteForce(query, limit: 5, minScore: null, tags: null), unfiltered);
+        var slowPathLogs = this.logger.ReceivedCalls().Count(c =>
+            c.GetMethodInfo().Name == nameof(ILogger.Log) && c.GetArguments()[0] is LogLevel.Information
+            && c.GetArguments()[2]!.ToString()!.Contains("exact join", StringComparison.Ordinal));
+        Assert.Equal(1, slowPathLogs);
     }
 
     [Fact]

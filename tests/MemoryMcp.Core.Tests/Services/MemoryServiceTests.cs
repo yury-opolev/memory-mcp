@@ -465,6 +465,27 @@ public class MemoryServiceTests
     }
 
     [Fact]
+    public async Task IngestAsync_DuplicateSearchLimitZero_SkipsDuplicateGuard()
+    {
+        var monitor = CreateMonitor(new MemoryMcpOptions { DuplicateSearchLimit = 0 });
+        var svc = new MemoryService(this.chunking, this.embedding, this.store, monitor, this.logger);
+
+        var content = "Content with a disabled duplicate search";
+        this.chunking.Chunk(content).Returns(
+        [
+            new ChunkInfo { ChunkIndex = 0, Text = content, StartOffset = 0, Length = content.Length }
+        ]);
+        this.embedding.EmbedBatchAsync(Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns([FakeVector()]);
+
+        var result = await svc.IngestAsync(content);
+
+        Assert.True(result.Success);
+        await this.store.DidNotReceive().SearchAsync(
+            Arg.Any<float[]>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task IngestAsync_NoDuplicate_Succeeds()
     {
         var content = "Unique content that has no duplicates";
