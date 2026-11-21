@@ -239,6 +239,7 @@ Data is stored in three places:
 |------|-------|-----|
 | Chunk metadata | SQLite `chunks` table | Queryable structured data (title, tags, timestamps, offsets) |
 | Embedding vectors | SQLite `chunks_vec` virtual table (sqlite-vec) | Fast cosine-similarity nearest-neighbor search |
+| Keyword index | SQLite `memories_fts` (contentless FTS5) + `memories_fts_map` | BM25 keyword and hybrid search; holds tokens, not the text |
 | Full content | `{DataDirectory}/memories/{id}.memory.data` files | Avoids storing large text blobs in the database |
 
 **SQLite schema:**
@@ -280,9 +281,21 @@ Text is split by whitespace into words, then grouped into overlapping windows. D
 
 `IMemoryService.FindSimilarAsync` is the dense-only variant for threshold checks (duplicate guard, consolidation): it never takes tags and will never fuse keyword ranking, so its threshold always means cosine similarity.
 
+### Keyword and hybrid search
+
+`IHybridMemorySearch` (registered by `AddMemoryMcpCore`) searches in three modes (`MemorySearchMode`):
+
+- **Dense** — the search pipeline above, unchanged (`MemoryMcp:Search:DefaultMode`, the default).
+- **Keyword** — BM25 over a contentless FTS5 index (`memories_fts`): one row per memory with its folded title and content (`body`, `unicode61 remove_diacritics 2`) and their Snowball stems (`stem`, ru/da/en). Queries become safe `MATCH` expressions (`KeywordQuery.Build`): quoted phrases stay phrases, `word*` stays a prefix, other words are OR-ed.
+- **Hybrid** — both lists fused with reciprocal rank fusion (`k = 60`; weighted RRF and convex combination configurable), giving the keyword list priority for quoted phrases and identifier-like tokens. If the query cannot be embedded it falls back to keyword; if the keyword index is unavailable it falls back to dense, and says so.
+
+Tag filters and excluded ids (`MemorySearchFilter`) are applied before scoring in both lists. The index rows are written in the same transaction as the chunks and vectors; deleting or editing a memory removes its row and rewrites the index (`optimize`) under `secure_delete`, so no indexed token of deleted text survives. Existing memories are indexed on the first start (and again whenever the folding/stemming fingerprint changes). The index needs FTS5 `contentless_delete` (SQLite 3.43+); with older engines (the SQLCipher bundle) it reports itself unavailable and dense search works as before. Settings live under `MemoryMcp:Search` (`DefaultMode`, `KeywordVariant`, `Fusion`, `RrfK`, `KeywordWeight`, `DenseWeight`, `ExactIntentKeywordBoost`, `Candidates`, `UseQueryInstruction`, `QueryInstruction`, `QueryTimeoutMs`).
+
+The engine-agnostic pieces (`MemoryMcp.Core.Retrieval`: fusion, exact-intent detection, vector math, folding, tokenizer, Snowball stemming, keyword queries; `MemoryMcp.Core.Evaluation`: ranking metrics, paired statistics, ablation reports, pre-registration) are shared with Cortex's episodic history search.
+
 ### Deletion
 
-Deletes are physical: sqlite-vec ≥ 0.1.9 zeroes the deleted vector slot, `PRAGMA secure_delete = ON` zeroes deleted rows, and the WAL (if enabled) is truncated after every delete. On first start the store rebuilds vector tables written by older sqlite-vec versions and runs `VACUUM` (`PRAGMA user_version = 1` marks it done).
+Deletes are physical: sqlite-vec ≥ 0.1.9 zeroes the deleted vector slot, `PRAGMA secure_delete = ON` zeroes deleted rows, the keyword index is rewritten without the deleted entries, and the WAL (if enabled) is truncated after every delete. On first start the store rebuilds vector tables written by older sqlite-vec versions and runs `VACUUM` (`PRAGMA user_version = 1` marks it done).
 
 ### sqlite-vec binaries
 
