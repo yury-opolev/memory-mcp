@@ -75,6 +75,11 @@ public class MemoryMcpOptions
     public OllamaOptions Ollama { get; set; } = new();
 
     /// <summary>
+    /// Keyword and hybrid search settings (<c>MemoryMcp:Search</c>).
+    /// </summary>
+    public MemorySearchOptions Search { get; set; } = new();
+
+    /// <summary>
     /// Full path to the SQLite database file.
     /// </summary>
     public string DatabasePath => Path.Combine(DataDirectory, DatabaseFileName);
