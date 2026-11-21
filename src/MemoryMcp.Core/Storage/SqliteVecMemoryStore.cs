@@ -74,8 +74,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             await this.connection.OpenAsync(cancellationToken);
         }
 
-        // Load sqlite-vec extension
-        this.connection.LoadExtension("vec0");
+        var vecVersion = SqliteVecExtension.Load(this.connection);
 
         // Create chunks metadata table
         using var createChunksCmd = this.connection.CreateCommand();
@@ -107,8 +106,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             """;
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}",
-            this.options.DatabasePath, this.options.Ollama.Dimensions);
+        this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}, sqlite-vec: {VecVersion}",
+            this.options.DatabasePath, this.options.Ollama.Dimensions, vecVersion);
     }
 
     public async Task StoreMemoryAsync(string memoryId, string content, List<ChunkRecord> chunks, List<float[]> vectors, CancellationToken cancellationToken = default)

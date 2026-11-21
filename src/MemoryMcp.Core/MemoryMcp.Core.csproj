@@ -22,7 +22,13 @@
     <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
     <PackageReference Include="OllamaSharp" Version="5.4.23" />
-    <PackageReference Include="sqlite-vec" Version="0.1.7-alpha.2.1" />
+  </ItemGroup>
+
+  <!-- sqlite-vec (vec0) is vendored from the official GitHub release by scripts/update-sqlite-vec.ps1:
+       the NuGet package stopped at 0.1.7-alpha.2.1, which predates real vector deletion.
+       SqliteVecExtension loads runtimes/<rid>/native/vec0.* from the output directory. -->
+  <ItemGroup>
+    <None Update="runtimes\**\native\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
