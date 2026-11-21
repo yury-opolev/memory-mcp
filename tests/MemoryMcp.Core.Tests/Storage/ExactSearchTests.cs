@@ -121,6 +121,26 @@ public sealed class ExactSearchTests : IDisposable
         Assert.Equal("mem-0010", Assert.Single(results).MemoryId);
     }
 
+    [Theory]
+    [InlineData(4096)]
+    [InlineData(500)]
+    public async Task SearchDenseAsync_ExcludedIds_AreRemovedBeforeScoring(int knnMaxK)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.SeedAsync(memoryCount: 1000, tagsFor: i => i % 100 == 7 ? ["rare"] : ["common"], ct);
+        this.store.KnnMaxK = knnMaxK;
+        var query = ClusteredVector(new Random(99), cluster: 3);
+        var excluded = this.BruteForce(query, limit: 3, minScore: null, tags: null).Select(r => r.MemoryId).ToHashSet(StringComparer.Ordinal);
+        var rareExcluded = this.BruteForce(query, limit: 1, minScore: null, tags: ["rare"]).Select(r => r.MemoryId).ToHashSet(StringComparer.Ordinal);
+
+        var unfiltered = await this.store.SearchDenseAsync(query, 5, null, new MemorySearchFilter { ExcludeIds = excluded }, ct);
+        var tagged = await this.store.SearchDenseAsync(query, 5, null, new MemorySearchFilter { Tags = ["rare"], ExcludeIds = rareExcluded }, ct);
+
+        AssertSameRanking(this.BruteForce(query, limit: 5, minScore: null, tags: null, excluded), unfiltered);
+        AssertSameRanking(this.BruteForce(query, limit: 5, minScore: null, tags: ["rare"], rareExcluded), tagged);
+        Assert.Equal(5, tagged.Count);
+    }
+
     // Parameter sets of the Cortex threshold callers: consolidation (5, 0.3), compaction (10, 0.7),
     // subagent context (3, 0.3) and the ingest duplicate guard (5, 0.9).
     [Theory]
@@ -198,10 +218,11 @@ public sealed class ExactSearchTests : IDisposable
         return vector;
     }
 
-    private List<(string MemoryId, float Score)> BruteForce(float[] query, int limit, float? minScore, List<string>? tags)
+    private List<(string MemoryId, float Score)> BruteForce(float[] query, int limit,     float? minScore, List<string>? tags, IReadOnlySet<string>? excluded = null)
     {
         return this.seeded
             .Where(m => tags is null || tags.Any(t => m.Value.Tags.Contains(t, StringComparer.OrdinalIgnoreCase)))
+                .Where(m => excluded is null || !excluded.Contains(m.Key))
             .Select(m => (MemoryId: m.Key, Score: m.Value.Vectors.Max(v => Cosine(query, v))))
             .Where(r => minScore is null || r.Score >= minScore.Value)
             .OrderByDescending(r => r.Score)

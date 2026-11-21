@@ -62,6 +62,18 @@ public interface IMemoryStore
     Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Exact cosine search like <see cref="SearchAsync"/> with every <paramref name="filter"/> (tags and
+    /// excluded ids) applied before scoring, so excluded memories never take a result slot.
+    /// </summary>
+    /// <param name="queryVector">The query embedding vector.</param>
+    /// <param name="limit">Maximum number of unique memories to return.</param>
+    /// <param name="minScore">Minimum similarity score threshold (optional).</param>
+    /// <param name="filter">Tags and excluded ids.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Search results ordered by descending similarity score.</returns>
+    Task<List<SearchResult>> SearchDenseAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Checks whether a memory with the given ID exists.
     /// </summary>
     /// <param name="memoryId">The memory identifier.</param>

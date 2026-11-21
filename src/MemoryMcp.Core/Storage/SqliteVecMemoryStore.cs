@@ -375,9 +375,12 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         return true;
     }
 
-    public async Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default)
+    public Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default) =>
+        this.SearchDenseAsync(queryVector, limit, minScore, new MemorySearchFilter { Tags = tags }, cancellationToken);
+
+    public async Task<List<SearchResult>> SearchDenseAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken = default)
     {
-        var hasTagFilter = tags is { Count: > 0 };
+        ArgumentNullException.ThrowIfNull(filter);
         var chunkCount = await this.CountChunksAsync(cancellationToken);
         if (chunkCount == 0)
         {
@@ -385,18 +388,18 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
 
         List<SearchResult> topResults;
-        if (hasTagFilter && chunkCount > this.KnnMaxK)
+        if ((filter.HasTags || filter.HasExclusions) && chunkCount > this.KnnMaxK)
         {
             if (Interlocked.Exchange(ref this.slowPathLogged, 1) == 0)
             {
                 this.logger.LogExactJoinInUse(chunkCount, this.KnnMaxK);
             }
 
-            topResults = await this.ExactJoinSearchAsync(queryVector, limit, minScore, tags!, cancellationToken);
+            topResults = await this.ExactJoinSearchAsync(queryVector, limit, minScore, filter, cancellationToken);
         }
         else
         {
-            topResults = await this.KnnSearchAsync(queryVector, Math.Min(chunkCount, this.KnnMaxK), limit, minScore, hasTagFilter ? tags : null, cancellationToken);
+            topResults = await this.KnnSearchAsync(queryVector, Math.Min(chunkCount, this.KnnMaxK), limit, minScore, filter, cancellationToken);
         }
 
         // Load content for each result (decrypted if enabled)
@@ -420,12 +423,12 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     }
 
     /// <summary>
-    /// vec0 KNN is a flat scan, so with k = chunk count every chunk is ranked and the tag filter and
+    /// vec0 KNN is a flat scan, so with k = chunk count every chunk is ranked and the filters and
     /// per-memory grouping done afterwards are exact. With k capped below the chunk count (unfiltered
     /// only) the result is the true top-k chunks, so the top memories are exact as long as their best
     /// chunks fall inside that window.
     /// </summary>
-    private async Task<List<SearchResult>> KnnSearchAsync(float[] queryVector, int k, int limit, float? minScore, List<string>? tags, CancellationToken cancellationToken)
+    private async Task<List<SearchResult>> KnnSearchAsync(float[] queryVector, int k, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken)
     {
         // Rows arrive best-first, so the first row of a memory is its best chunk.
         var ranked = new List<(string MemoryId, float Distance)>();
@@ -453,6 +456,11 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
                 var chunkKey = knnReader.GetString(0);
                 var memoryId = chunkKey[..chunkKey.LastIndexOf(':')];
+                if (filter.HasExclusions && filter.ExcludeIds!.Contains(memoryId))
+                {
+                    continue;
+                }
+
                 if (seen.Add(memoryId))
                 {
                     ranked.Add((memoryId, knnReader.GetFloat(1)));
@@ -460,7 +468,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             }
         }
 
-        var tagFilter = tags is null ? null : JsonSerializer.Serialize(tags);
+        var tagFilter = filter.HasTags ? JsonSerializer.Serialize(filter.Tags) : null;
         var results = new List<SearchResult>();
 
         using var metaCmd = this.connection.CreateCommand();
@@ -514,10 +522,11 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     }
 
     /// <summary>
-    /// Exact tag-filtered search for corpora beyond the vec0 KNN cap: scores only the chunks that
-    /// match the filter. Correct but ~16-20 µs per chunk, because every chunk costs a vec0 point lookup.
+    /// Exact filtered search for corpora beyond the vec0 KNN cap: scores only the chunks that pass the
+    /// tag filter and are not excluded. Correct but ~16-20 µs per chunk, because every chunk costs a
+    /// vec0 point lookup.
     /// </summary>
-    private async Task<List<SearchResult>> ExactJoinSearchAsync(float[] queryVector, int limit, float? minScore, List<string> tags, CancellationToken cancellationToken)
+    private async Task<List<SearchResult>> ExactJoinSearchAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken)
     {
         using var cmd = this.connection.CreateCommand();
         cmd.CommandText = $"""
@@ -526,11 +535,13 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             FROM chunks c
             CROSS JOIN chunks_vec v
             WHERE v.ChunkKey = c.MemoryId || ':' || c.ChunkIndex
-            AND {TagsMatchFunction}(c.Tags, @tagFilter)
+            AND (@tagFilter IS NULL OR {TagsMatchFunction}(c.Tags, @tagFilter))
+            AND (@excluded IS NULL OR c.MemoryId NOT IN (SELECT value FROM json_each(@excluded)))
             ORDER BY distance
             """;
         cmd.Parameters.AddWithValue("@queryVector", VectorToBlob(queryVector));
-        cmd.Parameters.AddWithValue("@tagFilter", JsonSerializer.Serialize(tags));
+        cmd.Parameters.AddWithValue("@tagFilter", filter.HasTags ? JsonSerializer.Serialize(filter.Tags) : DBNull.Value);
+        cmd.Parameters.AddWithValue("@excluded", filter.HasExclusions ? JsonSerializer.Serialize(filter.ExcludeIds) : DBNull.Value);
 
         var resultsByMemory = new Dictionary<string, SearchResult>();
 
@@ -641,7 +652,7 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 internal static partial class SqliteVecMemoryStoreLog
 {
     [LoggerMessage(Level = LogLevel.Information,
-        Message = "Tag-filtered search is using the slower exact join path: {ChunkCount} chunks exceed the vec0 KNN window of {MaxK}.")]
+        Message = "Filtered search is using the slower exact join path: {ChunkCount} chunks exceed the vec0 KNN window of {MaxK}.")]
     internal static partial void LogExactJoinInUse(
         this ILogger logger, int chunkCount, int maxK);
 }
