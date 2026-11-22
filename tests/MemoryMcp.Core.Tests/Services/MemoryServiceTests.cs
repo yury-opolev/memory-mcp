@@ -316,6 +316,36 @@ public class MemoryServiceTests
         await this.store.Received(1).SearchAsync(queryVector, 10, 0.5f, tags, Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task FindSimilarAsync_Text_EmbedsTextAndRunsUnfilteredVectorSearch()
+    {
+        var vector = new float[] { 0.1f, 0.2f, 0.3f, 0.4f };
+        var expected = new List<SearchResult> { new() { MemoryId = "m-1", Content = "c", Score = 0.8f } };
+        this.embedding.EmbedAsync("user likes cats", Arg.Any<CancellationToken>()).Returns(vector);
+        this.store.SearchAsync(vector, 5, 0.3f, null, Arg.Any<CancellationToken>()).Returns(expected);
+
+        var results = await this.service.FindSimilarAsync("user likes cats", 5, 0.3f, TestContext.Current.CancellationToken);
+
+        Assert.Same(expected, results);
+        await this.store.Received(1).SearchAsync(vector, 5, 0.3f, null, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task FindSimilarAsync_EmptyText_ThrowsArgumentException()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => this.service.FindSimilarAsync("  ", 5, 0.3f, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FindSimilarAsync_NonPositiveLimit_ThrowsBeforeEmbedding()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => this.service.FindSimilarAsync("text", 0, 0.3f, TestContext.Current.CancellationToken));
+
+        await this.embedding.DidNotReceive().EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     // --- New duplicate guard tests ---
 
     [Fact]
@@ -430,6 +460,27 @@ public class MemoryServiceTests
         // Should NOT have called EmbedAsync (single) for dedup check
         await this.embedding.DidNotReceive().EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
         // Should NOT have called SearchAsync for dedup check
+        await this.store.DidNotReceive().SearchAsync(
+            Arg.Any<float[]>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task IngestAsync_DuplicateSearchLimitZero_SkipsDuplicateGuard()
+    {
+        var monitor = CreateMonitor(new MemoryMcpOptions { DuplicateSearchLimit = 0 });
+        var svc = new MemoryService(this.chunking, this.embedding, this.store, monitor, this.logger);
+
+        var content = "Content with a disabled duplicate search";
+        this.chunking.Chunk(content).Returns(
+        [
+            new ChunkInfo { ChunkIndex = 0, Text = content, StartOffset = 0, Length = content.Length }
+        ]);
+        this.embedding.EmbedBatchAsync(Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns([FakeVector()]);
+
+        var result = await svc.IngestAsync(content);
+
+        Assert.True(result.Success);
         await this.store.DidNotReceive().SearchAsync(
             Arg.Any<float[]>(), Arg.Any<int>(), Arg.Any<float?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>());
     }

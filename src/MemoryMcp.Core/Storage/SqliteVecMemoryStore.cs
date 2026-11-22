@@ -16,13 +16,23 @@ namespace MemoryMcp.Core.Storage;
 /// When encryption is enabled, the database is encrypted via SQLCipher and
 /// content files are encrypted via AES-256-GCM.
 /// </summary>
-public class SqliteVecMemoryStore : IMemoryStore, IDisposable
+public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
 {
     private readonly MemoryMcpOptions options;
     private readonly ILogger<SqliteVecMemoryStore> logger;
     private readonly IContentEncryptor contentEncryptor;
     private readonly SqliteConnection connection;
     private bool disposed;
+
+    private const string TagsMatchFunction = "memory_tags_match";
+
+    /// <summary>vec0's maximum <c>k</c> for a KNN query.</summary>
+    internal const int VecMaxK = 4096;
+
+    /// <summary>Largest KNN window used by search; lowered in tests to exercise the beyond-cap paths.</summary>
+    internal int KnnMaxK { get; set; } = VecMaxK;
+
+    private int slowPathLogged;
 
     public SqliteVecMemoryStore(
         IOptions<MemoryMcpOptions> options,
@@ -74,8 +84,17 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             await this.connection.OpenAsync(cancellationToken);
         }
 
-        // Load sqlite-vec extension
-        this.connection.LoadExtension("vec0");
+        var vecVersion = SqliteVecExtension.Load(this.connection);
+
+        // Overwrite deleted content with zeros so a deleted memory leaves no bytes in the file.
+        // The pragma is per connection, so it is set on every open.
+        using (var secureDeleteCmd = this.connection.CreateCommand())
+        {
+            secureDeleteCmd.CommandText = "PRAGMA secure_delete = ON;";
+            await secureDeleteCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        this.connection.CreateFunction<string?, string, bool>(TagsMatchFunction, TagsMatch, isDeterministic: true);
 
         // Create chunks metadata table
         using var createChunksCmd = this.connection.CreateCommand();
@@ -99,16 +118,130 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
 
         // Create sqlite-vec virtual table for vectors
         using var createVecCmd = this.connection.CreateCommand();
-        createVecCmd.CommandText = $"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-                ChunkKey TEXT PRIMARY KEY,
-                Vector   float[{this.options.Ollama.Dimensions}] distance_metric=cosine
-            );
-            """;
+        createVecCmd.CommandText = this.CreateVectorTableSql;
         await createVecCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}",
-            this.options.DatabasePath, this.options.Ollama.Dimensions);
+        await this.RebuildLegacyVectorTableAsync(vecVersion, cancellationToken);
+        await this.InitializeKeywordIndexAsync(cancellationToken);
+
+        this.logger.LogInformation("Memory store initialized. Database: {DatabasePath}, Dimensions: {Dimensions}, sqlite-vec: {VecVersion}",
+            this.options.DatabasePath, this.options.Ollama.Dimensions, vecVersion);
+    }
+
+    private string CreateVectorTableSql => $"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+            ChunkKey TEXT PRIMARY KEY,
+            Vector   float[{this.options.Ollama.Dimensions}] distance_metric=cosine
+        );
+        """;
+
+    /// <summary>
+    /// Schema version 1 means the vector table was rebuilt by sqlite-vec &gt;= 0.1.9. Older releases
+    /// only cleared a validity bit on DELETE, so the vectors of deleted memories may still sit in
+    /// the old table. Copying the live vectors into a fresh table and vacuuming removes them.
+    /// Vectors without a chunk row are unreachable by search and are dropped too.
+    /// <para>
+    /// A rolled-back image still runs the old library on the same file, and the schema version cannot
+    /// tell. Every delete from <c>chunks</c> therefore stamps <c>vec_version()</c> of the deleting
+    /// process into <c>vec_writer_meta</c> (the trigger lives in the file, so the old binary fires it
+    /// too). A stamp older than 0.1.9, or none at all, means an old writer may have deleted since the
+    /// last rebuild, so the rebuild runs again.
+    /// </para>
+    /// </summary>
+    private async Task RebuildLegacyVectorTableAsync(string vecVersion, CancellationToken cancellationToken)
+    {
+        const int VectorsRebuiltVersion = 1;
+
+        long userVersion;
+        using (var versionCmd = this.connection.CreateCommand())
+        {
+            versionCmd.CommandText = "PRAGMA user_version;";
+            userVersion = (long)(await versionCmd.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        var lastDeleteWriter = await this.ReadLastDeleteWriterAsync(cancellationToken);
+        using (var metaCmd = this.connection.CreateCommand())
+        {
+            metaCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS vec_writer_meta (
+                    Id                   INTEGER PRIMARY KEY CHECK (Id = 1),
+                    LastDeleteVecVersion TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS chunks_record_delete_writer AFTER DELETE ON chunks
+                BEGIN
+                    INSERT OR REPLACE INTO vec_writer_meta (Id, LastDeleteVecVersion) VALUES (1, vec_version());
+                END;
+                """;
+            await metaCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (userVersion >= VectorsRebuiltVersion && lastDeleteWriter is not null && SqliteVecExtension.WipesDeletedVectors(lastDeleteWriter))
+        {
+            return;
+        }
+
+        using (var transaction = this.connection.BeginTransaction())
+        {
+            string[] steps =
+            [
+                """
+                CREATE TEMP TABLE chunks_vec_rebuild AS
+                SELECT v.ChunkKey, v.Vector
+                FROM chunks c
+                CROSS JOIN chunks_vec v
+                WHERE v.ChunkKey = c.MemoryId || ':' || c.ChunkIndex;
+                """,
+                "DROP TABLE chunks_vec;",
+                this.CreateVectorTableSql,
+                "INSERT INTO chunks_vec (ChunkKey, Vector) SELECT ChunkKey, Vector FROM chunks_vec_rebuild;",
+                "DROP TABLE chunks_vec_rebuild;",
+                $"PRAGMA user_version = {VectorsRebuiltVersion};",
+            ];
+
+            foreach (var sql in steps)
+            {
+                using var cmd = this.connection.CreateCommand();
+                cmd.Transaction = transaction;
+                cmd.CommandText = sql;
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using (var stampCmd = this.connection.CreateCommand())
+            {
+                stampCmd.Transaction = transaction;
+                stampCmd.CommandText = "INSERT OR REPLACE INTO vec_writer_meta (Id, LastDeleteVecVersion) VALUES (1, @version);";
+                stampCmd.Parameters.AddWithValue("@version", vecVersion);
+                await stampCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            transaction.Commit();
+        }
+
+        using (var vacuumCmd = this.connection.CreateCommand())
+        {
+            vacuumCmd.CommandText = "VACUUM;";
+            await vacuumCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        this.logger.LogInformation("Rebuilt the vector table with sqlite-vec >= 0.1.9 and vacuumed {DatabasePath}.", this.options.DatabasePath);
+    }
+
+    private async Task<string?> ReadLastDeleteWriterAsync(CancellationToken cancellationToken)
+    {
+        using var cmd = this.connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT LastDeleteVecVersion FROM vec_writer_meta WHERE Id = 1
+            AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'chunks_record_delete_writer');
+            """;
+        try
+        {
+            return await cmd.ExecuteScalarAsync(cancellationToken) as string;
+        }
+        catch (SqliteException)
+        {
+            // No vec_writer_meta table yet: a database from before the writer stamp existed.
+            return null;
+        }
     }
 
     public async Task StoreMemoryAsync(string memoryId, string content, List<ChunkRecord> chunks, List<float[]> vectors, CancellationToken cancellationToken = default)
@@ -158,6 +291,8 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
                 insertVecCmd.Parameters.AddWithValue("@vector", VectorToBlob(vector));
                 await insertVecCmd.ExecuteNonQueryAsync(cancellationToken);
             }
+
+            await this.IndexKeywordDocumentAsync(transaction, memoryId, chunks.Count > 0 ? chunks[0].Title : null, content, cancellationToken);
 
             transaction.Commit();
             this.logger.LogDebug("Stored memory {MemoryId} with {ChunkCount} chunks.", memoryId, chunks.Count);
@@ -237,10 +372,80 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
 
         cmd.CommandText = $"UPDATE chunks SET {string.Join(", ", setClauses)} WHERE MemoryId = @memoryId";
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+        // The title is part of the keyword document: re-index it in the same transaction.
+        var contentPath = this.GetContentPath(memoryId);
+        var content = title is not null && this.KeywordIndexAvailable && File.Exists(contentPath)
+            ? await this.ReadContentFileAsync(contentPath, cancellationToken)
+            : null;
+        using var transaction = this.connection.BeginTransaction();
+        cmd.Transaction = transaction;
+        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        var replaced = content is not null && updated > 0
+            && await this.IndexKeywordDocumentAsync(transaction, memoryId, title, content, cancellationToken);
+        transaction.Commit();
+        if (replaced)
+        {
+            await this.PurgeDeletedKeywordEntriesAsync(cancellationToken);
+        }
     }
 
-    public async Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default)
+    public async Task<int> DeleteMemoriesAsync(IReadOnlyCollection<string> memoryIds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(memoryIds);
+        return await this.DeleteBatchAsync(memoryIds.Distinct(StringComparer.Ordinal).ToList(), cancellationToken);
+    }
+
+    public async Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default) =>
+        await this.DeleteBatchAsync([memoryId], cancellationToken) == 1;
+
+    /// <summary>
+    /// Deletes the memories one transaction each, then rewrites the keyword index without the deleted entries
+    /// and (in WAL mode) moves the wiped pages into the database file and truncates the WAL so no pre-delete
+    /// copy survives there; the checkpoint is a no-op in the default rollback-journal mode. The rewrite and
+    /// the checkpoint run once per batch, so a bulk delete stays linear while a single delete erases at once.
+    /// </summary>
+    private async Task<int> DeleteBatchAsync(IReadOnlyList<string> memoryIds, CancellationToken cancellationToken)
+    {
+        var deleted = new List<string>();
+        try
+        {
+            foreach (var memoryId in memoryIds)
+            {
+                if (await this.DeleteMemoryRowsAsync(memoryId, cancellationToken))
+                {
+                    deleted.Add(memoryId);
+                }
+            }
+        }
+        finally
+        {
+            if (deleted.Count > 0)
+            {
+                await this.PurgeDeletedKeywordEntriesAsync(cancellationToken);
+                using (var checkpointCmd = this.connection.CreateCommand())
+                {
+                    checkpointCmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                    await checkpointCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                foreach (var memoryId in deleted)
+                {
+                    var contentPath = this.GetContentPath(memoryId);
+                    if (File.Exists(contentPath))
+                    {
+                        File.Delete(contentPath);
+                    }
+
+                    this.logger.LogDebug("Deleted memory {MemoryId}.", memoryId);
+                }
+            }
+        }
+
+        return deleted.Count;
+    }
+
+    private async Task<bool> DeleteMemoryRowsAsync(string memoryId, CancellationToken cancellationToken)
     {
         // Check if exists
         if (!await this.ExistsAsync(memoryId, cancellationToken))
@@ -267,94 +472,44 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
             deleteChunksCmd.Parameters.AddWithValue("@memoryId", memoryId);
             await deleteChunksCmd.ExecuteNonQueryAsync(cancellationToken);
 
+            await this.RemoveKeywordDocumentAsync(transaction, memoryId, cancellationToken);
+
             transaction.Commit();
+            return true;
         }
         catch
         {
             transaction.Rollback();
             throw;
         }
-
-        // Delete content file
-        var contentPath = this.GetContentPath(memoryId);
-        if (File.Exists(contentPath))
-        {
-            File.Delete(contentPath);
-        }
-
-        this.logger.LogDebug("Deleted memory {MemoryId}.", memoryId);
-        return true;
     }
 
-    public async Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default)
+    public Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default) =>
+        this.SearchDenseAsync(queryVector, limit, minScore, new MemorySearchFilter { Tags = tags }, cancellationToken);
+
+    public async Task<List<SearchResult>> SearchDenseAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken = default)
     {
-        // Query sqlite-vec for nearest neighbors
-        // Fetch more than limit to account for grouping by MemoryId and filtering
-        int fetchLimit = limit * 10;
-
-        using var cmd = this.connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT v.ChunkKey, v.distance, c.Title, c.Tags, c.CreatedAt, c.UpdatedAt
-            FROM chunks_vec v
-            INNER JOIN chunks c ON c.MemoryId || ':' || c.ChunkIndex = v.ChunkKey
-            WHERE v.Vector MATCH @queryVector
-            AND k = @fetchLimit
-            ORDER BY v.distance
-            """;
-        cmd.Parameters.AddWithValue("@queryVector", VectorToBlob(queryVector));
-        cmd.Parameters.AddWithValue("@fetchLimit", fetchLimit);
-
-        var resultsByMemory = new Dictionary<string, SearchResult>();
-
-        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        ArgumentNullException.ThrowIfNull(filter);
+        var chunkCount = await this.CountChunksAsync(cancellationToken);
+        if (chunkCount == 0)
         {
-            var chunkKey = reader.GetString(0);
-            var distance = reader.GetFloat(1);
-            var title = reader.IsDBNull(2) ? null : reader.GetString(2);
-            var chunkTags = JsonSerializer.Deserialize<List<string>>(reader.GetString(3)) ?? [];
-            var createdAt = DateTimeOffset.Parse(reader.GetString(4));
-            var updatedAt = DateTimeOffset.Parse(reader.GetString(5));
-
-            var (parsedMemoryId, _) = ParseChunkKey(chunkKey);
-
-            // sqlite-vec with cosine metric returns distance in [0, 2] (0 = identical, 2 = opposite)
-            // Convert to similarity score: similarity = 1 - distance (range: 1 to -1)
-            float score = 1.0f - distance;
-
-            // Apply minimum score filter
-            if (minScore.HasValue && score < minScore.Value)
-            {
-                continue;
-            }
-
-            // Apply tag filter: memory must have at least one of the requested tags
-            if (tags is { Count: > 0 } && !tags.Any(t => chunkTags.Contains(t, StringComparer.OrdinalIgnoreCase)))
-            {
-                continue;
-            }
-
-            // Group by memory: keep the best score per memory
-            if (!resultsByMemory.TryGetValue(parsedMemoryId, out var existing) || score > existing.Score)
-            {
-                resultsByMemory[parsedMemoryId] = new SearchResult
-                {
-                    MemoryId = parsedMemoryId,
-                    Title = title,
-                    Content = string.Empty, // Will be filled below
-                    Tags = chunkTags,
-                    CreatedAt = createdAt,
-                    UpdatedAt = updatedAt,
-                    Score = score,
-                };
-            }
+            return [];
         }
 
-        // Sort by score descending, take top limit
-        var topResults = resultsByMemory.Values
-            .OrderByDescending(r => r.Score)
-            .Take(limit)
-            .ToList();
+        List<SearchResult> topResults;
+        if ((filter.HasTags || filter.HasExclusions) && chunkCount > this.KnnMaxK)
+        {
+            if (Interlocked.Exchange(ref this.slowPathLogged, 1) == 0)
+            {
+                this.logger.LogExactJoinInUse(chunkCount, this.KnnMaxK);
+            }
+
+            topResults = await this.ExactJoinSearchAsync(queryVector, limit, minScore, filter, cancellationToken);
+        }
+        else
+        {
+            topResults = await this.KnnSearchAsync(queryVector, Math.Min(chunkCount, this.KnnMaxK), limit, minScore, filter, cancellationToken);
+        }
 
         // Load content for each result (decrypted if enabled)
         foreach (var result in topResults)
@@ -367,6 +522,172 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
 
         return topResults;
+    }
+
+    private async Task<int> CountChunksAsync(CancellationToken cancellationToken)
+    {
+        using var cmd = this.connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM chunks";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// vec0 KNN is a flat scan, so with k = chunk count every chunk is ranked and the filters and
+    /// per-memory grouping done afterwards are exact. With k capped below the chunk count (unfiltered
+    /// only) the result is the true top-k chunks, so the top memories are exact as long as their best
+    /// chunks fall inside that window.
+    /// </summary>
+    private async Task<List<SearchResult>> KnnSearchAsync(float[] queryVector, int k, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken)
+    {
+        // Rows arrive best-first, so the first row of a memory is its best chunk.
+        var ranked = new List<(string MemoryId, float Distance)>();
+        var seen = new HashSet<string>();
+
+        using (var knnCmd = this.connection.CreateCommand())
+        {
+            knnCmd.CommandText = """
+                SELECT v.ChunkKey, v.distance
+                FROM chunks_vec v
+                WHERE v.Vector MATCH @queryVector AND k = @k
+                ORDER BY v.distance
+                """;
+            knnCmd.Parameters.AddWithValue("@queryVector", VectorToBlob(queryVector));
+            knnCmd.Parameters.AddWithValue("@k", k);
+
+            using var knnReader = await knnCmd.ExecuteReaderAsync(cancellationToken);
+            while (await knnReader.ReadAsync(cancellationToken))
+            {
+                // A NULL distance means an unscorable (zero) vector.
+                if (knnReader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                var chunkKey = knnReader.GetString(0);
+                var memoryId = chunkKey[..chunkKey.LastIndexOf(':')];
+                if (filter.HasExclusions && filter.ExcludeIds!.Contains(memoryId))
+                {
+                    continue;
+                }
+
+                if (seen.Add(memoryId))
+                {
+                    ranked.Add((memoryId, knnReader.GetFloat(1)));
+                }
+            }
+        }
+
+        var tagFilter = filter.HasTags ? JsonSerializer.Serialize(filter.Tags) : null;
+        var results = new List<SearchResult>();
+
+        using var metaCmd = this.connection.CreateCommand();
+        metaCmd.CommandText = """
+            SELECT Title, Tags, CreatedAt, UpdatedAt
+            FROM chunks
+            WHERE MemoryId = @memoryId AND ChunkIndex = 0
+            """;
+        var memoryIdParameter = metaCmd.Parameters.Add("@memoryId", SqliteType.Text);
+
+        foreach (var (memoryId, distance) in ranked)
+        {
+            if (results.Count >= limit)
+            {
+                break;
+            }
+
+            // Cosine distance is in [0, 2]; similarity = 1 - distance is in [-1, 1].
+            float score = 1.0f - distance;
+            if (minScore.HasValue && score < minScore.Value)
+            {
+                break; // ranked is best-first
+            }
+
+            memoryIdParameter.Value = memoryId;
+            using var metaReader = await metaCmd.ExecuteReaderAsync(cancellationToken);
+            if (!await metaReader.ReadAsync(cancellationToken))
+            {
+                continue;
+            }
+
+            var tagsJson = metaReader.IsDBNull(1) ? null : metaReader.GetString(1);
+            if (tagFilter is not null && !TagsMatch(tagsJson, tagFilter))
+            {
+                continue;
+            }
+
+            results.Add(new SearchResult
+            {
+                MemoryId = memoryId,
+                Title = metaReader.IsDBNull(0) ? null : metaReader.GetString(0),
+                Content = string.Empty, // Will be filled by the caller
+                Tags = JsonSerializer.Deserialize<List<string>>(tagsJson ?? "[]") ?? [],
+                CreatedAt = DateTimeOffset.Parse(metaReader.GetString(2)),
+                UpdatedAt = DateTimeOffset.Parse(metaReader.GetString(3)),
+                Score = score,
+            });
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Exact filtered search for corpora beyond the vec0 KNN cap: scores only the chunks that pass the
+    /// tag filter and are not excluded. Correct but ~16-20 µs per chunk, because every chunk costs a
+    /// vec0 point lookup.
+    /// </summary>
+    private async Task<List<SearchResult>> ExactJoinSearchAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken)
+    {
+        using var cmd = this.connection.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT c.MemoryId, vec_distance_cosine(v.Vector, @queryVector) AS distance,
+                   c.Title, c.Tags, c.CreatedAt, c.UpdatedAt
+            FROM chunks c
+            CROSS JOIN chunks_vec v
+            WHERE v.ChunkKey = c.MemoryId || ':' || c.ChunkIndex
+            AND (@tagFilter IS NULL OR {TagsMatchFunction}(c.Tags, @tagFilter))
+            AND (@excluded IS NULL OR c.MemoryId NOT IN (SELECT value FROM json_each(@excluded)))
+            ORDER BY distance
+            """;
+        cmd.Parameters.AddWithValue("@queryVector", VectorToBlob(queryVector));
+        cmd.Parameters.AddWithValue("@tagFilter", filter.HasTags ? JsonSerializer.Serialize(filter.Tags) : DBNull.Value);
+        cmd.Parameters.AddWithValue("@excluded", filter.HasExclusions ? JsonSerializer.Serialize(filter.ExcludeIds) : DBNull.Value);
+
+        var resultsByMemory = new Dictionary<string, SearchResult>();
+
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var memoryId = reader.GetString(0);
+
+            // Rows arrive best-first, so the first row of a memory is its best chunk.
+            // A NULL distance means an unscorable (zero) vector.
+            if (resultsByMemory.ContainsKey(memoryId) || reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            float score = 1.0f - reader.GetFloat(1);
+            if (minScore.HasValue && score < minScore.Value)
+            {
+                continue;
+            }
+
+            resultsByMemory[memoryId] = new SearchResult
+            {
+                MemoryId = memoryId,
+                Title = reader.IsDBNull(2) ? null : reader.GetString(2),
+                Content = string.Empty, // Will be filled by the caller
+                Tags = JsonSerializer.Deserialize<List<string>>(reader.GetString(3)) ?? [],
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(4)),
+                UpdatedAt = DateTimeOffset.Parse(reader.GetString(5)),
+                Score = score,
+            };
+        }
+
+        return resultsByMemory.Values
+            .OrderByDescending(r => r.Score)
+            .Take(limit)
+            .ToList();
     }
 
     public async Task<bool> ExistsAsync(string memoryId, CancellationToken cancellationToken = default)
@@ -392,10 +713,21 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
     private static string FormatChunkKey(string memoryId, int chunkIndex)
         => $"{memoryId}:{chunkIndex}";
 
-    private static (string MemoryId, int ChunkIndex) ParseChunkKey(string chunkKey)
+    /// <summary>
+    /// SQL function <c>memory_tags_match(chunkTagsJson, filterJson)</c>: true when the chunk shares at
+    /// least one tag with the filter. Case-insensitive like <see cref="StringComparer.OrdinalIgnoreCase"/>,
+    /// which SQLite's ASCII-only NOCASE cannot provide for non-Latin tags.
+    /// </summary>
+    private static bool TagsMatch(string? chunkTagsJson, string filterJson)
     {
-        var lastColon = chunkKey.LastIndexOf(':');
-        return (chunkKey[..lastColon], int.Parse(chunkKey[(lastColon + 1)..]));
+        if (string.IsNullOrEmpty(chunkTagsJson))
+        {
+            return false;
+        }
+
+        var chunkTags = JsonSerializer.Deserialize<List<string>>(chunkTagsJson) ?? [];
+        var filter = JsonSerializer.Deserialize<List<string>>(filterJson) ?? [];
+        return filter.Any(t => chunkTags.Contains(t, StringComparer.OrdinalIgnoreCase));
     }
 
     private string GetContentPath(string memoryId)
@@ -424,4 +756,12 @@ public class SqliteVecMemoryStore : IMemoryStore, IDisposable
         }
         GC.SuppressFinalize(this);
     }
+}
+
+internal static partial class SqliteVecMemoryStoreLog
+{
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Filtered search is using the slower exact join path: {ChunkCount} chunks exceed the vec0 KNN window of {MaxK}.")]
+    internal static partial void LogExactJoinInUse(
+        this ILogger logger, int chunkCount, int maxK);
 }

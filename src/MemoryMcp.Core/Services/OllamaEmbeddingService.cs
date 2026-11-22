@@ -1,9 +1,9 @@
 using System.Net.Http.Headers;
 using MemoryMcp.Core.Configuration;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OllamaSharp;
+using OllamaSharp.Models;
 using OllamaSharp.Models.Exceptions;
 
 namespace MemoryMcp.Core.Services;
@@ -196,9 +196,22 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
         return results[0];
     }
 
-    public async Task<IReadOnlyList<float[]>> EmbedBatchAsync(
+    /// <summary>Embeds texts; an input beyond num_ctx is truncated by Ollama (memory contents may be long).</summary>
+    public Task<IReadOnlyList<float[]>> EmbedBatchAsync(
         IEnumerable<string> texts,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        this.EmbedCoreAsync(texts, strict: false, cancellationToken);
+
+    /// <summary>Embeds texts with truncate=false: an input beyond num_ctx fails instead of being embedded cut.</summary>
+    public Task<IReadOnlyList<float[]>> EmbedBatchStrictAsync(
+        IEnumerable<string> texts,
+        CancellationToken cancellationToken = default) =>
+        this.EmbedCoreAsync(texts, strict: true, cancellationToken);
+
+    private async Task<IReadOnlyList<float[]>> EmbedCoreAsync(
+        IEnumerable<string> texts,
+        bool strict,
+        CancellationToken cancellationToken)
     {
         var textList = texts.ToList();
         if (textList.Count == 0)
@@ -214,15 +227,27 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
             currentModel = this.model;
         }
 
+        var numCtx = this.options.CurrentValue.Ollama.NumCtx;
         try
         {
-            IEmbeddingGenerator<string, Embedding<float>> generator = current;
-            var result = await generator.GenerateAsync(textList, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
+            // strict: truncate=false makes an input longer than num_ctx fail loudly instead of being embedded cut.
+            var response = await current.EmbedAsync(
+                new EmbedRequest
+                {
+                    Model = currentModel,
+                    Input = textList,
+                    Truncate = strict ? false : null,
+                    Options = new RequestOptions { NumCtx = numCtx },
+                },
+                cancellationToken).ConfigureAwait(false);
 
-            return result
-                .Select(e => e.Vector.ToArray())
-                .ToList();
+            if (response.Embeddings is null || response.Embeddings.Count != textList.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Ollama returned {response.Embeddings?.Count ?? 0} embeddings for {textList.Count} inputs.");
+            }
+
+            return response.Embeddings;
         }
         catch (HttpRequestException ex)
         {
@@ -232,6 +257,12 @@ public sealed class OllamaEmbeddingService : IEmbeddingService, IDisposable
                 "Please ensure Ollama is installed and running. " +
                 "Install: https://ollama.com/download -- " +
                 $"Then run: ollama pull {currentModel}",
+                ex);
+        }
+        catch (OllamaException ex) when (ex.Message.Contains("context length", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new EmbeddingInputTooLongException(
+                $"An input exceeds the embedding context window (num_ctx={numCtx}) of model '{currentModel}'; it was not truncated.",
                 ex);
         }
         catch (OllamaException ex)

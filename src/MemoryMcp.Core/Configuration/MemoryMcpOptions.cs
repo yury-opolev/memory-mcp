@@ -75,6 +75,11 @@ public class MemoryMcpOptions
     public OllamaOptions Ollama { get; set; } = new();
 
     /// <summary>
+    /// Keyword and hybrid search settings (<c>MemoryMcp:Search</c>).
+    /// </summary>
+    public MemorySearchOptions Search { get; set; } = new();
+
+    /// <summary>
     /// Full path to the SQLite database file.
     /// </summary>
     public string DatabasePath => Path.Combine(DataDirectory, DatabaseFileName);
@@ -118,6 +123,13 @@ public class OllamaOptions
     /// Must match the model's output dimensions (or a supported MRL dimension).
     /// </summary>
     public int Dimensions { get; set; } = 1024;
+
+    /// <summary>
+    /// Context window (<c>num_ctx</c>) sent with every embed request. Requests are sent with
+    /// <c>truncate=false</c>, so an input longer than this fails instead of being silently cut.
+    /// Default: 4096 (a 3,000-character chunk of digits or symbols stays below it).
+    /// </summary>
+    public int NumCtx { get; set; } = 4096;
 
     /// <summary>
     /// Optional Bearer API key for authenticated (remote) Ollama endpoints.

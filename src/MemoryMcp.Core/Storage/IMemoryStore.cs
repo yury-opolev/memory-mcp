@@ -49,8 +49,19 @@ public interface IMemoryStore
     Task<bool> DeleteMemoryAsync(string memoryId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Searches for the most similar chunks using vector similarity.
-    /// Returns results grouped by memory ID with the best score per memory.
+    /// Deletes many memories as one batch. The erasure guarantee of <see cref="DeleteMemoryAsync"/> holds
+    /// when the call returns, but the keyword index is rewritten and the WAL truncated once for the whole
+    /// batch instead of once per memory.
+    /// </summary>
+    /// <param name="memoryIds">The memory identifiers; unknown ones are skipped.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The number of memories that existed and were deleted.</returns>
+    Task<int> DeleteMemoriesAsync(IReadOnlyCollection<string> memoryIds, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Exact cosine search: scores every chunk that passes the filters (filters are applied before
+    /// scoring, so any filter keeps exact recall) and returns memories grouped by ID with the best
+    /// chunk score per memory. Ranking is always pure vector similarity.
     /// </summary>
     /// <param name="queryVector">The query embedding vector.</param>
     /// <param name="limit">Maximum number of unique memories to return.</param>
@@ -59,6 +70,42 @@ public interface IMemoryStore
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Search results ordered by descending similarity score.</returns>
     Task<List<SearchResult>> SearchAsync(float[] queryVector, int limit, float? minScore = null, List<string>? tags = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Exact cosine search like <see cref="SearchAsync"/> with every <paramref name="filter"/> (tags and
+    /// excluded ids) applied before scoring, so excluded memories never take a result slot.
+    /// </summary>
+    /// <param name="queryVector">The query embedding vector.</param>
+    /// <param name="limit">Maximum number of unique memories to return.</param>
+    /// <param name="minScore">Minimum similarity score threshold (optional).</param>
+    /// <param name="filter">Tags and excluded ids.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Search results ordered by descending similarity score.</returns>
+    Task<List<SearchResult>> SearchDenseAsync(float[] queryVector, int limit, float? minScore, MemorySearchFilter filter, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Why the keyword (FTS5 BM25) index cannot be used — e.g. the linked SQLite engine lacks FTS5
+    /// <c>contentless_delete</c> — or null when it is available.
+    /// </summary>
+    string? KeywordIndexUnavailableReason { get; }
+
+    /// <summary>
+    /// BM25 search of the keyword index (folded title and content of each memory) with
+    /// <paramref name="filter"/> applied before ranking. Empty when the index is unavailable.
+    /// </summary>
+    /// <param name="matchExpression">An FTS5 MATCH expression (see <see cref="Retrieval.KeywordQuery.Build"/>).</param>
+    /// <param name="limit">Maximum number of memories to return.</param>
+    /// <param name="filter">Tags and excluded ids.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Memories ordered by descending BM25 relevance.</returns>
+    Task<List<KeywordHit>> KeywordSearchAsync(string matchExpression, int limit, MemorySearchFilter filter, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Re-creates every keyword index row from the stored titles and content files (migration and
+    /// version changes). Returns the number of indexed memories; 0 when the index is unavailable.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task<int> RebuildKeywordIndexAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Checks whether a memory with the given ID exists.

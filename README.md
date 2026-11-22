@@ -239,6 +239,7 @@ Data is stored in three places:
 |------|-------|-----|
 | Chunk metadata | SQLite `chunks` table | Queryable structured data (title, tags, timestamps, offsets) |
 | Embedding vectors | SQLite `chunks_vec` virtual table (sqlite-vec) | Fast cosine-similarity nearest-neighbor search |
+| Keyword index | SQLite `memories_fts` (contentless FTS5) + `memories_fts_map` | BM25 keyword and hybrid search; holds tokens, not the text |
 | Full content | `{DataDirectory}/memories/{id}.memory.data` files | Avoids storing large text blobs in the database |
 
 **SQLite schema:**
@@ -273,11 +274,32 @@ Text is split by whitespace into words, then grouped into overlapping windows. D
 ### Search Pipeline
 
 1. Embed the query text with Ollama.
-2. Query sqlite-vec for the nearest `limit * 10` chunk vectors (overfetch to account for grouping and filtering).
-3. Convert cosine distance to similarity: `score = 1 - distance`.
-4. Apply `minScore` and tag filters.
-5. Group by memory ID, keeping the best chunk score per memory.
-6. Sort by score descending, return top `limit` results with content loaded from files.
+2. Select the chunks that pass the tag filter (case-insensitive, any tag matches) and score **every** one of them with `vec_distance_cosine` — an exact scan, so a selective filter never loses matches.
+3. Convert cosine distance to similarity: `score = 1 - distance`, and drop scores below `minScore`.
+4. Group by memory ID, keeping the best chunk score per memory.
+5. Sort by score descending, return top `limit` results with content loaded from files.
+
+`IMemoryService.FindSimilarAsync` is the dense-only variant for threshold checks (duplicate guard, consolidation): it never takes tags and will never fuse keyword ranking, so its threshold always means cosine similarity.
+
+### Keyword and hybrid search
+
+`IHybridMemorySearch` (registered by `AddMemoryMcpCore`) searches in three modes (`MemorySearchMode`):
+
+- **Dense** — the search pipeline above, unchanged (`MemoryMcp:Search:DefaultMode=Dense` selects it).
+- **Keyword** — BM25 over a contentless FTS5 index (`memories_fts`): one row per memory with its folded title and content (`body`, `unicode61 remove_diacritics 2`) and their Snowball stems (`stem`, ru/da/en). Queries become safe `MATCH` expressions (`KeywordQuery.Build`): quoted phrases stay phrases, `word*` stays a prefix, other words are OR-ed.
+- **Hybrid** (`MemoryMcp:Search:DefaultMode`, the default) — both lists fused with reciprocal rank fusion (`k = 60`; weighted RRF and convex combination configurable), giving the keyword list priority for quoted phrases and identifier-like tokens. If the query cannot be embedded it falls back to keyword; if the keyword index is unavailable it falls back to dense, and says so.
+
+Tag filters and excluded ids (`MemorySearchFilter`) are applied before scoring in both lists. The index rows are written in the same transaction as the chunks and vectors; deleting or editing a memory removes its row and rewrites the index (`optimize`) under `secure_delete`, so no indexed token of deleted text survives. Existing memories are indexed on the first start (and again whenever the folding/stemming fingerprint changes). The index needs FTS5 `contentless_delete` (SQLite 3.43+); with older engines (the SQLCipher bundle) it reports itself unavailable and dense search works as before. Settings live under `MemoryMcp:Search` (`DefaultMode`, `KeywordVariant`, `Fusion`, `RrfK`, `KeywordWeight`, `DenseWeight`, `ExactIntentKeywordBoost`, `Candidates`, `UseQueryInstruction`, `QueryInstruction`, `QueryTimeoutMs`).
+
+The engine-agnostic pieces (`MemoryMcp.Core.Retrieval`: fusion, exact-intent detection, vector math, folding, tokenizer, Snowball stemming, keyword queries; `MemoryMcp.Core.Evaluation`: ranking metrics, paired statistics, ablation reports, pre-registration) are shared with Cortex's episodic history search.
+
+### Deletion
+
+Deletes are physical: sqlite-vec ≥ 0.1.9 zeroes the deleted vector slot, `PRAGMA secure_delete = ON` zeroes deleted rows, the keyword index is rewritten without the deleted entries, and the WAL (if enabled) is truncated after every delete. On first start the store rebuilds vector tables written by older sqlite-vec versions and runs `VACUUM` (`PRAGMA user_version = 1` marks it done).
+
+### sqlite-vec binaries
+
+The NuGet `sqlite-vec` package stops at 0.1.7-alpha.2.1, so the official release binaries are vendored in `src/MemoryMcp.Core/runtimes/<rid>/native/` (win-x64, linux-x64, linux-arm64, osx-x64, osx-arm64) with their licenses and `SQLITE-VEC-VERSION.txt`. To update: `pwsh scripts/update-sqlite-vec.ps1 -Version <x.y.z>` (needs `gh`); it verifies every archive against the release `checksums.txt` and GitHub's asset digest. The store refuses to start with a version older than 0.1.9.
 
 ## Configuration
 
@@ -366,8 +388,8 @@ The integration tests skip automatically if Ollama is not available. They cover 
 
 | Test Project | Tests | What It Covers |
 |---|---|---|
-| `MemoryMcp.Core.Tests` | 49 | Chunking, MemoryService orchestration, SqliteVec store CRUD |
-| `MemoryMcp.Tests` | 21 | MCP tool response formatting, tag parsing, content truncation |
+| `MemoryMcp.Core.Tests` | 100 | Chunking, MemoryService orchestration, SqliteVec store CRUD, byte-level erasure, exact filtered search |
+| `MemoryMcp.Tests` | 26 | MCP tool response formatting, tag parsing, content truncation |
 | `MemoryMcp.Core.IntegrationTests` | 27 | Embedding quality, search relevance, latency (requires Ollama) |
 
 ## Project Structure
@@ -381,6 +403,7 @@ memory-mcp/
     install.sh / install.ps1         One-step install (build, publish, configure)
     setup.sh / setup.ps1             Setup scripts (restore, build, pull model)
     run.sh / run.ps1                 Publish + start server (--rebuild to force)
+    update-sqlite-vec.ps1            Vendor + verify sqlite-vec release binaries
 
   src/
     MemoryMcp.Core/                  Core library (no MCP dependency)
@@ -406,6 +429,8 @@ memory-mcp/
       Storage/
         IMemoryStore.cs              Persistence interface
         SqliteVecMemoryStore.cs      SQLite + sqlite-vec + file storage
+        SqliteVecExtension.cs        Loads vendored vec0, enforces >= 0.1.9
+      runtimes/                      Vendored sqlite-vec binaries per RID
 
     MemoryMcp/                       MCP host (executable)
       Program.cs                     Entry point, DI, stdio transport

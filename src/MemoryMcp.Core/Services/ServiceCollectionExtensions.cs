@@ -26,6 +26,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IChunkingService, WordChunkingService>();
         services.AddSingleton<IEmbeddingService, OllamaEmbeddingService>();
         services.AddSingleton<IMemoryService, MemoryService>();
+        services.AddSingleton<IHybridMemorySearch, HybridMemorySearch>();
 
         // Register key store (singleton so the key is retrieved only once)
         services.AddSingleton<IKeyStore>(sp =>
