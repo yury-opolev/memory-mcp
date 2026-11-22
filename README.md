@@ -285,9 +285,9 @@ Text is split by whitespace into words, then grouped into overlapping windows. D
 
 `IHybridMemorySearch` (registered by `AddMemoryMcpCore`) searches in three modes (`MemorySearchMode`):
 
-- **Dense** — the search pipeline above, unchanged (`MemoryMcp:Search:DefaultMode`, the default).
+- **Dense** — the search pipeline above, unchanged (`MemoryMcp:Search:DefaultMode=Dense` selects it).
 - **Keyword** — BM25 over a contentless FTS5 index (`memories_fts`): one row per memory with its folded title and content (`body`, `unicode61 remove_diacritics 2`) and their Snowball stems (`stem`, ru/da/en). Queries become safe `MATCH` expressions (`KeywordQuery.Build`): quoted phrases stay phrases, `word*` stays a prefix, other words are OR-ed.
-- **Hybrid** — both lists fused with reciprocal rank fusion (`k = 60`; weighted RRF and convex combination configurable), giving the keyword list priority for quoted phrases and identifier-like tokens. If the query cannot be embedded it falls back to keyword; if the keyword index is unavailable it falls back to dense, and says so.
+- **Hybrid** (`MemoryMcp:Search:DefaultMode`, the default) — both lists fused with reciprocal rank fusion (`k = 60`; weighted RRF and convex combination configurable), giving the keyword list priority for quoted phrases and identifier-like tokens. If the query cannot be embedded it falls back to keyword; if the keyword index is unavailable it falls back to dense, and says so.
 
 Tag filters and excluded ids (`MemorySearchFilter`) are applied before scoring in both lists. The index rows are written in the same transaction as the chunks and vectors; deleting or editing a memory removes its row and rewrites the index (`optimize`) under `secure_delete`, so no indexed token of deleted text survives. Existing memories are indexed on the first start (and again whenever the folding/stemming fingerprint changes). The index needs FTS5 `contentless_delete` (SQLite 3.43+); with older engines (the SQLCipher bundle) it reports itself unavailable and dense search works as before. Settings live under `MemoryMcp:Search` (`DefaultMode`, `KeywordVariant`, `Fusion`, `RrfK`, `KeywordWeight`, `DenseWeight`, `ExactIntentKeywordBoost`, `Candidates`, `UseQueryInstruction`, `QueryInstruction`, `QueryTimeoutMs`).
 

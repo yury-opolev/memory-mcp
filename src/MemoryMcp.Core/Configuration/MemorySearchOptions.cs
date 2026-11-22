@@ -28,13 +28,13 @@ public enum MemoryKeywordVariant
 /// <summary>
 /// Memory search settings, bound from <c>MemoryMcp:Search</c>. All apply at query time (the keyword
 /// index always holds both the plain and the stemmed column), so every value can be ablated without
-/// re-indexing. The defaults keep the pre-hybrid behaviour: <see cref="DefaultMode"/> is
-/// <see cref="MemorySearchMode.Dense"/> until an evaluation shows hybrid is better.
+/// re-indexing. <see cref="DefaultMode"/> is <see cref="MemorySearchMode.Hybrid"/>; it falls back to the
+/// dense or keyword list, saying so, when the keyword index or the embedder is unavailable.
 /// </summary>
 public class MemorySearchOptions
 {
     /// <summary>The mode used when the caller does not choose one (<c>memory_search mode=auto</c>).</summary>
-    public MemorySearchMode DefaultMode { get; set; } = MemorySearchMode.Dense;
+    public MemorySearchMode DefaultMode { get; set; } = MemorySearchMode.Hybrid;
 
     /// <summary>Keyword matching variant.</summary>
     public MemoryKeywordVariant KeywordVariant { get; set; } = MemoryKeywordVariant.Plain;
