@@ -78,6 +78,7 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
         // Ensure directories exist
         Directory.CreateDirectory(this.options.DataDirectory);
         Directory.CreateDirectory(this.options.MemoriesDirectory);
+        this.DeleteLeftoverTempFiles();
 
         if (this.connection.State != System.Data.ConnectionState.Open)
         {
@@ -733,11 +734,42 @@ public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable
     private string GetContentPath(string memoryId)
         => Path.Combine(this.options.MemoriesDirectory, $"{memoryId}.memory.data");
 
+    /// <summary>Suffix of the temporary file a content write goes through before it replaces the content file.</summary>
+    internal const string TempSuffix = ".tmp";
+
+    /// <summary>
+    /// Writes the content file atomically: the bytes go to a temporary file that is flushed to disk and then
+    /// renamed over the content file, so a crash leaves either the old or the new content, never a torn file.
+    /// </summary>
     private async Task WriteContentFileAsync(string path, string content, CancellationToken cancellationToken)
     {
         var plainBytes = Encoding.UTF8.GetBytes(content);
         var outputBytes = this.contentEncryptor.Encrypt(plainBytes);
-        await File.WriteAllBytesAsync(path, outputBytes, cancellationToken);
+        var temp = path + TempSuffix;
+        try
+        {
+            await using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous))
+            {
+                await stream.WriteAsync(outputBytes, cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temp, path, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(temp);
+            throw;
+        }
+    }
+
+    /// <summary>Removes temporary content files left behind by a crash mid-write (the old content file is intact).</summary>
+    private void DeleteLeftoverTempFiles()
+    {
+        foreach (var temp in Directory.EnumerateFiles(this.options.MemoriesDirectory, "*.memory.data" + TempSuffix))
+        {
+            File.Delete(temp);
+        }
     }
 
     private async Task<string> ReadContentFileAsync(string path, CancellationToken cancellationToken)
