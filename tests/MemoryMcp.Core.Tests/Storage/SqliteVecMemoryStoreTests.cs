@@ -413,4 +413,36 @@ public class SqliteVecMemoryStoreTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(
             () => this.store.StoreMemoryAsync(memoryId, "content", chunks, vectors));
     }
+
+    [Fact]
+    public async Task StoreMemoryAsync_WritesThroughATempFileThatIsGoneAfterwards()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.store.InitializeAsync(ct);
+        var memoryId = Guid.NewGuid().ToString();
+        var (chunks, vectors) = CreateTestChunks(memoryId);
+
+        await this.store.StoreMemoryAsync(memoryId, "atomic content", chunks, vectors, ct);
+
+        var memories = Path.Combine(this.tempDir, "memories");
+        Assert.Equal("atomic content", await File.ReadAllTextAsync(Path.Combine(memories, $"{memoryId}.memory.data"), ct));
+        Assert.Empty(Directory.EnumerateFiles(memories, "*.tmp"));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_TornTempFileFromACrash_IsRemovedAndTheContentFileKept()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await this.store.InitializeAsync(ct);
+        var memoryId = Guid.NewGuid().ToString();
+        var (chunks, vectors) = CreateTestChunks(memoryId);
+        await this.store.StoreMemoryAsync(memoryId, "kept content", chunks, vectors, ct);
+        var contentPath = Path.Combine(this.tempDir, "memories", $"{memoryId}.memory.data");
+        await File.WriteAllTextAsync(contentPath + ".tmp", "torn", ct);
+
+        await this.store.InitializeAsync(ct);
+
+        Assert.False(File.Exists(contentPath + ".tmp"));
+        Assert.Equal("kept content", (await this.store.GetMemoryAsync(memoryId, ct))!.Content);
+    }
 }
