@@ -8,7 +8,7 @@ public class KeywordQueryTests
     [Fact]
     public void Build_PlainWords_FoldedQuotedAndOred()
     {
-        Assert.Equal("body : (\"kobenhavn\" OR \"train\")", KeywordQuery.Build("København train", stemmed: false));
+        Assert.Equal("body : (\"zurich\" OR \"train\")", KeywordQuery.Build("Zürich train", stemmed: false));
     }
 
     [Fact]
