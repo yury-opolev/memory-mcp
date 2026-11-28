@@ -13,7 +13,8 @@ namespace MemoryMcp.Core.Storage;
 /// SQLite + sqlite-vec implementation of IMemoryStore.
 /// Stores chunk metadata in a regular table, vectors in a sqlite-vec virtual table,
 /// and full content in files on disk.
-/// When encryption is enabled, the database is encrypted via SQLCipher and
+/// When encryption is enabled, the database is encrypted by the linked SQLite engine (SQLCipher, or
+/// SQLite3 Multiple Ciphers in the standalone server) and
 /// content files are encrypted via AES-256-GCM.
 /// </summary>
 public partial class SqliteVecMemoryStore : IMemoryStore, IDisposable

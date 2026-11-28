@@ -9,9 +9,14 @@
     <ProjectReference Include="..\MemoryMcp.Core\MemoryMcp.Core.csproj" />
   </ItemGroup>
 
+  <!-- SQLite3 Multiple Ciphers is the server's SQLite engine: its SQLitePCLRaw.batteries_v2 replaces the
+       one MemoryMcp.Core brings with SQLitePCLRaw.bundle_e_sqlcipher (SQLite 3.39), so Batteries_V2.Init()
+       in AddMemoryMcpCore loads it. The keyword index needs FTS5 contentless_delete (SQLite 3.43 or later).
+       The Cortex agent selects the same engine in the same way. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="ModelContextProtocol" Version="1.0.0" />
+    <PackageReference Include="SQLite3MC.PCLRaw.bundle" Version="2.7.1" />
   </ItemGroup>
 
   <ItemGroup>

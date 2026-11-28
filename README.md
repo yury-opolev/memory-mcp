@@ -289,13 +289,25 @@ Text is split by whitespace into words, then grouped into overlapping windows. D
 - **Keyword** — BM25 over a contentless FTS5 index (`memories_fts`): one row per memory with its folded title and content (`body`, `unicode61 remove_diacritics 2`) and their Snowball stems (`stem`, ru/da/en). Queries become safe `MATCH` expressions (`KeywordQuery.Build`): quoted phrases stay phrases, `word*` stays a prefix, other words are OR-ed.
 - **Hybrid** (`MemoryMcp:Search:DefaultMode`, the default) — both lists fused with reciprocal rank fusion (`k = 60`; weighted RRF and convex combination configurable), giving the keyword list priority for quoted phrases and identifier-like tokens. If the query cannot be embedded it falls back to keyword; if the keyword index is unavailable it falls back to dense, and says so.
 
-Tag filters and excluded ids (`MemorySearchFilter`) are applied before scoring in both lists. The index rows are written in the same transaction as the chunks and vectors; deleting or editing a memory removes its row and rewrites the index (`optimize`) under `secure_delete`, so no indexed token of deleted text survives. Existing memories are indexed on the first start (and again whenever the folding/stemming fingerprint changes). The index needs FTS5 `contentless_delete` (SQLite 3.43+); with older engines (the SQLCipher bundle) it reports itself unavailable and dense search works as before. Settings live under `MemoryMcp:Search` (`DefaultMode`, `KeywordVariant`, `Fusion`, `RrfK`, `KeywordWeight`, `DenseWeight`, `ExactIntentKeywordBoost`, `Candidates`, `UseQueryInstruction`, `QueryInstruction`, `QueryTimeoutMs`).
+Tag filters and excluded ids (`MemorySearchFilter`) are applied before scoring in both lists. The index rows are written in the same transaction as the chunks and vectors; deleting or editing a memory removes its row and rewrites the index (`optimize`) under `secure_delete`, so no indexed token of deleted text survives. Existing memories are indexed on the first start (and again whenever the folding/stemming fingerprint changes). The index needs FTS5 `contentless_delete` (SQLite 3.43+). The standalone server links SQLite3 Multiple Ciphers, which has it (see [SQLite engine and encryption](#sqlite-engine-and-encryption)); a host that uses `MemoryMcp.Core` with only its SQLCipher bundle (SQLite 3.39) gets an index that reports itself unavailable, and dense search works as before. Settings live under `MemoryMcp:Search` (`DefaultMode`, `KeywordVariant`, `Fusion`, `RrfK`, `KeywordWeight`, `DenseWeight`, `ExactIntentKeywordBoost`, `Candidates`, `UseQueryInstruction`, `QueryInstruction`, `QueryTimeoutMs`).
 
 The engine-agnostic pieces (`MemoryMcp.Core.Retrieval`: fusion, exact-intent detection, vector math, folding, tokenizer, Snowball stemming, keyword queries; `MemoryMcp.Core.Evaluation`: ranking metrics, paired statistics, ablation reports, pre-registration) are shared with Cortex's episodic history search.
 
 ### Deletion
 
 Deletes are physical: sqlite-vec ≥ 0.1.9 zeroes the deleted vector slot, `PRAGMA secure_delete = ON` zeroes deleted rows, the keyword index is rewritten without the deleted entries, and the WAL (if enabled) is truncated after every delete. On first start the store rebuilds vector tables written by older sqlite-vec versions and runs `VACUUM` (`PRAGMA user_version = 1` marks it done).
+
+### SQLite engine and encryption
+
+The standalone server links [SQLite3 Multiple Ciphers](https://utelle.github.io/SQLite3MultipleCiphers/) (`SQLite3MC.PCLRaw.bundle`, SQLite 3.43 or later), which the keyword index needs. `MemoryMcp.Core` itself still references `SQLitePCLRaw.bundle_e_sqlcipher` (SQLCipher 4.5, SQLite 3.39); a host picks the engine by also referencing the SQLite3MC bundle, whose `SQLitePCLRaw.batteries_v2` assembly takes precedence. The server project does that, and so does the Cortex agent.
+
+With `Encryption.Enabled`, content files are encrypted with AES-256-GCM and the database by the engine, with the same key as passphrase. Releases before the engine change wrote the database in the SQLCipher format, which SQLite3 Multiple Ciphers does not open by default. The server therefore converts such a database once, at startup, before the store opens it (`SqlCipherDatabaseConverter`):
+
+1. It reads the old file in the engine's SQLCipher compatibility mode (`cipher=sqlcipher`, `legacy=4`) and writes a copy in the current format with `VACUUM INTO`, so no unencrypted copy ever reaches the disk and the original is only read.
+2. It verifies the copy (integrity check, row count of every table) and then replaces the original with it.
+3. The original stays beside it as `memory.db.sqlcipher-backup`, encrypted with the same key. Delete it once the converted database has proven itself.
+
+A database that already opens with the current engine is left alone, so later starts do nothing. If the key does not open the file in either format, the database is in use by another process, or a `-journal`/`-wal` file lies beside a SQLCipher database, the server stops with an error and leaves the original in place and unchanged. Close every other session that uses the memory server before the first start of the new version. To go back to an earlier release, reinstall it and rename `memory.db.sqlcipher-backup` to `memory.db` (memories written after the conversion are then not in that file).
 
 ### sqlite-vec binaries
 
@@ -389,7 +401,7 @@ The integration tests skip automatically if Ollama is not available. They cover 
 | Test Project | Tests | What It Covers |
 |---|---|---|
 | `MemoryMcp.Core.Tests` | 100 | Chunking, MemoryService orchestration, SqliteVec store CRUD, byte-level erasure, exact filtered search |
-| `MemoryMcp.Tests` | 26 | MCP tool response formatting, tag parsing, content truncation |
+| `MemoryMcp.Tests` | 50 | MCP tool response formatting, tag parsing, content truncation, the server's SQLite engine, SQLCipher database conversion |
 | `MemoryMcp.Core.IntegrationTests` | 27 | Embedding quality, search relevance, latency (requires Ollama) |
 
 ## Project Structure
@@ -434,6 +446,8 @@ memory-mcp/
 
     MemoryMcp/                       MCP host (executable)
       Program.cs                     Entry point, DI, stdio transport
+      Storage/
+        SqlCipherDatabaseConverter.cs  One-time conversion of a SQLCipher database
       Tools/
         MemoryTools.cs               5 MCP tool definitions
       appsettings.json               Default configuration

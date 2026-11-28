@@ -1,10 +1,13 @@
 using MemoryMcp.Core.Configuration;
+using MemoryMcp.Core.Security;
 using MemoryMcp.Core.Services;
 using MemoryMcp.Core.Storage;
+using MemoryMcp.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -31,6 +34,18 @@ var host = builder.Build();
 // Initialize the memory store (create DB schema, directories)
 using (var scope = host.Services.CreateScope())
 {
+    // An encrypted database written by the SQLCipher engine of earlier releases is converted once to the
+    // format of the current engine (SQLite3 Multiple Ciphers); the original stays beside it as a backup.
+    var memoryOptions = scope.ServiceProvider.GetRequiredService<IOptions<MemoryMcpOptions>>().Value;
+    if (memoryOptions.Encryption.Enabled)
+    {
+        var key = await scope.ServiceProvider.GetRequiredService<IKeyStore>().GetOrCreateKeyAsync();
+        SqlCipherDatabaseConverter.ConvertIfNeeded(
+            memoryOptions.DatabasePath,
+            Convert.ToBase64String(key),
+            scope.ServiceProvider.GetRequiredService<ILogger<Program>>());
+    }
+
     var store = scope.ServiceProvider.GetRequiredService<IMemoryStore>();
     await store.InitializeAsync();
 

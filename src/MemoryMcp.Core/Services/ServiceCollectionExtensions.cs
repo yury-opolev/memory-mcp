@@ -18,7 +18,9 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddMemoryMcpCore(this IServiceCollection services, Microsoft.Extensions.Configuration.IConfiguration configuration)
     {
-        // Initialize SQLCipher provider before any SQLite usage
+        // Initialize the SQLite provider before any SQLite usage: SQLCipher from this library's own bundle, or
+        // SQLite3 Multiple Ciphers when the host also references SQLite3MC.PCLRaw.bundle (the standalone server
+        // and the Cortex agent do), whose batteries assembly then takes precedence.
         SQLitePCL.Batteries_V2.Init();
 
         services.Configure<MemoryMcpOptions>(configuration.GetSection(MemoryMcpOptions.SectionName));
@@ -50,7 +52,7 @@ public static class ServiceCollectionExtensions
             return new AesGcmContentEncryptor(key);
         });
 
-        // Register memory store (uses same key for SQLCipher)
+        // Register memory store (uses the same key for the database)
         services.AddSingleton<IMemoryStore>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<MemoryMcpOptions>>();
