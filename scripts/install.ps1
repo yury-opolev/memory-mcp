@@ -181,27 +181,29 @@ function Unregister-ServiceTask([string]$taskName) {
     }
 }
 
-# True when bin holds the build this install publishes: its MemoryMcp.dll is identical to a fresh console build's
-# (the service copy cannot be compared directly, as its windowless build differs in the assembly itself).
-function Test-BinMatchesBuild {
-    $binDll = Join-Path $BinDir "MemoryMcp.dll"
-    if (-not (Test-Path -LiteralPath $binDll)) {
+# Publishes the console build that bin should hold into a fresh directory; returns its path, or null on a failure.
+# (The service copy cannot stand in for it: its windowless build differs in the assembly itself.)
+function Publish-BinBuild {
+    $buildDir = Join-Path $InstallRoot "bin-build"
+    if (Test-Path -LiteralPath $buildDir) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force
+    }
+    & dotnet publish "$RepoDir\src\MemoryMcp" `
+        --configuration Release `
+        --output "$buildDir" `
+        --verbosity quiet | Out-Host
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $buildDir "MemoryMcp.dll"))) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    return $buildDir
+}
+
+function Test-SameFile([string]$first, [string]$second) {
+    if (-not (Test-Path -LiteralPath $first) -or -not (Test-Path -LiteralPath $second)) {
         return $false
     }
-    $stagingDir = Join-Path $InstallRoot "bin-compare"
-    try {
-        & dotnet publish "$RepoDir\src\MemoryMcp" `
-            --configuration Release `
-            --output "$stagingDir" `
-            --verbosity quiet | Out-Host
-        $stagingDll = Join-Path $stagingDir "MemoryMcp.dll"
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $stagingDll)) {
-            return $false
-        }
-        return (Get-FileHash -LiteralPath $binDll -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $stagingDll -Algorithm SHA256).Hash
-    } finally {
-        Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    return (Get-FileHash -LiteralPath $first -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $second -Algorithm SHA256).Hash
 }
 
 function Publish-Bin {
@@ -314,15 +316,28 @@ function Update-SharedService {
 
     # bin is left as it is while open sessions run from it; it then may still hold an older build, which keeps
     # starting standalone servers if it predates shared mode.
+    # The build is copied over bin rather than published into it: a publish skips files whose copy in bin is newer,
+    # which an older build can be, and then bin would silently keep it.
     $isBinOld = $false
-    if (Test-DirectoryInUse $BinDir) {
-        Write-Host "bin is in use by open sessions and was left as is; the service was updated" -ForegroundColor Yellow
-        $isBinOld = -not (Test-BinMatchesBuild)
-    } elseif ((Publish-Bin) -ne 0) {
-        Write-Host "  WARNING: Publish to $BinDir failed; the service was updated." -ForegroundColor Yellow
+    $binBuildDir = Publish-BinBuild
+    if (-not $binBuildDir) {
+        Write-Host "  WARNING: The build for $BinDir failed; bin was left as is and the service was updated." -ForegroundColor Yellow
         $isBinOld = $true
+    } elseif (Test-DirectoryInUse $BinDir) {
+        Write-Host "bin is in use by open sessions and was left as is; the service was updated" -ForegroundColor Yellow
+        $isBinOld = -not (Test-SameFile (Join-Path $BinDir "MemoryMcp.dll") (Join-Path $binBuildDir "MemoryMcp.dll"))
     } else {
-        Write-Host "  Published to: $BinDir" -ForegroundColor Green
+        try {
+            New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+            Copy-Item -Path (Join-Path $binBuildDir "*") -Destination $BinDir -Recurse -Force -ErrorAction Stop
+            Write-Host "  Published to: $BinDir" -ForegroundColor Green
+        } catch {
+            Write-Host "  WARNING: Copying the build to $BinDir failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $isBinOld = $true
+        }
+    }
+    if ($binBuildDir) {
+        Remove-Item -LiteralPath $binBuildDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     $isSwitchingOn = ($Shared -eq $true) -and -not $WasSharedEnabled

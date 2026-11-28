@@ -378,16 +378,18 @@ update_shared_service() {
 
     # bin is left as it is while open sessions run from it; it then may still hold an older build, which keeps
     # starting standalone servers if it predates shared mode.
+    # The service build is the build bin should hold (they differ only on Windows). It is copied over bin rather than
+    # published into it: a publish skips files whose copy in bin is newer, which an older build can be.
     local is_bin_old=false
     if directory_in_use "$BIN_DIR"; then
         echo "bin is in use by open sessions and was left as is; the service was updated"
         if ! cmp -s "$BIN_DIR/MemoryMcp.dll" "$service_dir/MemoryMcp.dll"; then
             is_bin_old=true
         fi
-    elif publish_bin; then
+    elif mkdir -p "$BIN_DIR" && cp -R -f "$service_dir/." "$BIN_DIR/"; then
         echo "  Published to: $BIN_DIR"
     else
-        echo "  WARNING: Publish to $BIN_DIR failed; the service was updated."
+        echo "  WARNING: Copying the build to $BIN_DIR failed; the service was updated."
         is_bin_old=true
     fi
 
