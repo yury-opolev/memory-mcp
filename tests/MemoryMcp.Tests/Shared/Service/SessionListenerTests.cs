@@ -308,9 +308,14 @@ public sealed class SessionListenerTests : IAsyncDisposable
     {
         Assert.SkipWhen(OperatingSystem.IsWindows(), "Named pipes are Unix domain sockets only on Unix.");
         var socketPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + this.pipeName);
+        var boundPath = socketPath + ".bound";
+
+        // Disposing a socket deletes the file it was bound to, so the file is moved into place first: it stays as a
+        // socket file that nothing listens on, as after a crash.
         using (var stale = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified))
         {
-            stale.Bind(new UnixDomainSocketEndPoint(socketPath));
+            stale.Bind(new UnixDomainSocketEndPoint(boundPath));
+            File.Move(boundPath, socketPath);
         }
 
         Assert.True(File.Exists(socketPath));
