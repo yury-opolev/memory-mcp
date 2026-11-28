@@ -21,7 +21,7 @@
     registers the scheduled task MemoryMcp-<hash> that starts it at logon, restarts it on the new version and sets
     MemoryMcp.Shared.Enabled in settings.json. $false stops the service, removes the task and sets it false; open
     agent sessions must then be restarted. When omitted, shared mode is left as it is (and, when it is on, the service
-    is updated).
+    is updated). Shared mode needs PowerShell 7 or later (pwsh).
 #>
 
 param(
@@ -45,50 +45,100 @@ $SettingsFile = Join-Path $DataDir "settings.json"
 $ServicePathFile = Join-Path $DataDir "service-path.txt"
 $StopMarkerFile = Join-Path $DataDir "service.stopped"
 $DataDirArgument = "--MemoryMcp:DataDirectory=$DataDir"
+$LogDir = Join-Path $DataDir "logs"
+$IsPowerShell7 = $PSVersionTable.PSVersion.Major -ge 7
+
+# --- settings.json: read once, before anything is changed ---
+# $UserSettings is the parsed file (a hashtable on PowerShell 7, which every change goes through); $SettingsError says
+# why it could not be read. PowerShell 5.1 has no ConvertFrom-Json -AsHashtable, so there it is parsed only to see
+# whether shared mode is on.
+$UserSettings = @{}
+$SettingsError = $null
+$HasSettingsContent = $false
+if (Test-Path -LiteralPath $SettingsFile) {
+    $rawSettings = Get-Content -LiteralPath $SettingsFile -Raw
+    if ($rawSettings -and $rawSettings.Trim()) {
+        $HasSettingsContent = $true
+        try {
+            if ($IsPowerShell7) {
+                $UserSettings = $rawSettings | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            } else {
+                $UserSettings = $rawSettings | ConvertFrom-Json -ErrorAction Stop
+            }
+            if ($null -eq $UserSettings) {
+                $UserSettings = @{}
+            }
+        } catch {
+            $SettingsError = $_.Exception.Message
+            $UserSettings = @{}
+        }
+    }
+}
 
 # --- Shared mode helpers ---
-function Read-UserSettings {
-    if (Test-Path -LiteralPath $SettingsFile) {
-        $raw = Get-Content -LiteralPath $SettingsFile -Raw
-        if ($raw -and $raw.Trim()) {
-            return $raw | ConvertFrom-Json -AsHashtable
-        }
-    }
-    return @{}
-}
-
 function Get-SharedEnabled {
-    try {
-        $settings = Read-UserSettings
-    } catch {
-        # An unreadable settings.json is reported by the server itself; an install without -Shared goes on as before.
-        return $false
-    }
-    $memoryMcp = $settings["MemoryMcp"]
-    if ($memoryMcp -is [System.Collections.IDictionary] -and $memoryMcp["Shared"] -is [System.Collections.IDictionary]) {
-        $enabled = $memoryMcp["Shared"]["Enabled"]
-        if ($enabled -is [bool]) {
-            return $enabled
-        }
-        return "$enabled" -eq "true"
-    }
-    return $false
+    # Member access reads a hashtable key or an object property alike, and gives $null for a missing level.
+    $enabled = $UserSettings.MemoryMcp.Shared.Enabled
+    return "$enabled" -eq "true"
 }
 
-# Sets MemoryMcp.Shared.Enabled in settings.json and keeps every other key.
-function Set-SharedEnabled([bool]$enabled) {
+function Save-UserSettings {
     if (-not (Test-Path -LiteralPath $DataDir)) {
         New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
     }
-    $settings = Read-UserSettings
-    if (-not ($settings["MemoryMcp"] -is [System.Collections.IDictionary])) {
-        $settings["MemoryMcp"] = @{}
+    $UserSettings | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $SettingsFile -Encoding UTF8
+}
+
+# Sets MemoryMcp.<section>.Enabled in the settings read at the start and writes them; every other key is kept.
+function Set-SectionEnabled([string]$section, [bool]$enabled) {
+    if (-not ($UserSettings["MemoryMcp"] -is [System.Collections.IDictionary])) {
+        $UserSettings["MemoryMcp"] = @{}
     }
-    if (-not ($settings["MemoryMcp"]["Shared"] -is [System.Collections.IDictionary])) {
-        $settings["MemoryMcp"]["Shared"] = @{}
+    if (-not ($UserSettings["MemoryMcp"][$section] -is [System.Collections.IDictionary])) {
+        $UserSettings["MemoryMcp"][$section] = @{}
     }
-    $settings["MemoryMcp"]["Shared"]["Enabled"] = $enabled
-    $settings | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $SettingsFile -Encoding UTF8
+    $UserSettings["MemoryMcp"][$section]["Enabled"] = $enabled
+    Save-UserSettings
+}
+
+function Set-SharedEnabled([bool]$enabled) {
+    Set-SectionEnabled "Shared" $enabled
+}
+
+# The exact command that starts the service of this data directory with the given service copy.
+function Get-StartCommandText([string]$serviceDll) {
+    return "dotnet `"$serviceDll`" start `"$DataDirArgument`""
+}
+
+# Runs `status` until the service is ready (exit 0), while it reports that it is still starting (bounded to 120
+# seconds); prints what it reports. Returns "ready", "failed" (it runs, but its store failed to start; the error and
+# the log directory are printed) or "not ready" (not running, still starting after the bound, or not answering).
+function Wait-ServiceReady([string]$serviceDll) {
+    $deadline = (Get-Date).AddSeconds(120)
+    while ($true) {
+        $output = @(& dotnet $serviceDll status $DataDirArgument)
+        $exitCode = $LASTEXITCODE
+        $state = "$($output | Select-Object -First 1)".Trim()
+        if ($exitCode -eq 0) {
+            $output | Out-Host
+            return "ready"
+        }
+        if ($exitCode -eq 4 -and $state -eq "running, still starting" -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            continue
+        }
+        $output | Out-Host
+        if ($state -eq "running, startup failed") {
+            $startupError = "$($output | Where-Object { "$_".StartsWith("StartupError: ") } | Select-Object -First 1)"
+            Write-Host "ERROR: The memory service runs, but its store failed to start: $($startupError -replace '^StartupError: ', '')" -ForegroundColor Red
+            Write-Host "  See the service log in $LogDir" -ForegroundColor Red
+            return "failed"
+        }
+        if ($state -eq "running, still starting") {
+            Write-Host "ERROR: The memory service was still starting after 120 seconds. See the service log in $LogDir" -ForegroundColor Red
+        }
+        return "not ready"
+    }
 }
 
 # The service copy is a GUI-subsystem build (it has no console window), so its commands run through the dotnet host,
@@ -141,7 +191,8 @@ function Find-InstalledServiceDll {
     return $null
 }
 
-# True when a file in the directory cannot be opened for writing, as while a process runs from it.
+# True when a file in the directory is open in a process that does not share it, as while a process runs from it.
+# Only a sharing or lock violation counts: a read-only file (access denied) is not in use.
 function Test-DirectoryInUse([string]$directory) {
     if (-not (Test-Path -LiteralPath $directory)) {
         return $false
@@ -150,8 +201,13 @@ function Test-DirectoryInUse([string]$directory) {
         try {
             $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
             $stream.Dispose()
+        } catch [System.IO.IOException] {
+            # ERROR_SHARING_VIOLATION (32) or ERROR_LOCK_VIOLATION (33).
+            if (($_.Exception.HResult -band 0xFFFF) -in @(32, 33)) {
+                return $true
+            }
         } catch {
-            return $true
+            # Access denied (a read-only file) or anything else: not a sign that a process uses the file.
         }
     }
     return $false
@@ -295,8 +351,22 @@ function Update-SharedService {
     Write-Host "  Service path written to: $ServicePathFile" -ForegroundColor Green
 
     if ((Invoke-ServiceCommand $serviceDll @("stop")) -ne 0) {
-        Write-Host "ERROR: The previous memory service did not stop; it keeps running and serving open sessions." -ForegroundColor Red
-        Write-Host "  The new version is registered: it runs after the next logon, or run this install again." -ForegroundColor Red
+        # The stop either got no answer or the service was asked to stop and has not exited. The stop marker is
+        # withdrawn only when the previous service is confirmed alive and serving; otherwise it stays, and open
+        # sessions report the service as stopped until it is started.
+        & dotnet $serviceDll status $DataDirArgument | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            if (Test-Path -LiteralPath $StopMarkerFile) {
+                Remove-Item -LiteralPath $StopMarkerFile -Force
+            }
+            Write-Host "ERROR: The previous memory service did not stop and is still running and serving open sessions; the stop was withdrawn." -ForegroundColor Red
+            Write-Host "  The new version is registered: it runs after the next logon, or run this install again." -ForegroundColor Red
+        } else {
+            Write-Host "ERROR: The previous memory service was asked to stop and has not exited yet. Open sessions report it as stopped." -ForegroundColor Red
+            Write-Host "  It stays stopped until it is started. When it has exited, start it with:" -ForegroundColor Red
+            Write-Host "    $(Get-StartCommandText $serviceDll)" -ForegroundColor Red
+            Write-Host "  or run this install again." -ForegroundColor Red
+        }
         exit 1
     }
 
@@ -304,13 +374,20 @@ function Update-SharedService {
         Remove-Item -LiteralPath $StopMarkerFile -Force
     }
 
-    $statusExitCode = Invoke-ServiceCommand $serviceDll @("start")
-    if ($statusExitCode -eq 0) {
-        $statusExitCode = Invoke-ServiceCommand $serviceDll @("status")
+    $readiness = "not ready"
+    if ((Invoke-ServiceCommand $serviceDll @("start")) -eq 0) {
+        $readiness = Wait-ServiceReady $serviceDll
     }
-    if ($statusExitCode -ne 0) {
-        Write-Host "ERROR: The memory service did not start. See the service log in $(Join-Path $DataDir 'logs')." -ForegroundColor Red
-        Write-Host "  Open sessions wait for it. Start it with: `"$ServerExe`" start `"$DataDirArgument`", or run this install again." -ForegroundColor Red
+    if ($readiness -eq "failed") {
+        Write-Host "  Fix the cause; the running service retries its startup on the next tool call that comes 5 seconds or" -ForegroundColor Red
+        Write-Host "  more after the failure. Or run this install again." -ForegroundColor Red
+        exit 1
+    }
+    if ($readiness -ne "ready") {
+        Write-Host "ERROR: The memory service did not start. See the service log in $LogDir." -ForegroundColor Red
+        Write-Host "  Open sessions wait for it. Start it with:" -ForegroundColor Red
+        Write-Host "    $(Get-StartCommandText $serviceDll)" -ForegroundColor Red
+        Write-Host "  or run this install again." -ForegroundColor Red
         exit 1
     }
 
@@ -379,6 +456,27 @@ $WasSharedEnabled = Get-SharedEnabled
 $SharedOn = if ($null -ne $Shared) { [bool]$Shared } else { $WasSharedEnabled }
 $FinalWarning = $null
 
+# --- Checks before anything is changed ---
+if (($null -ne $Shared -or $WasSharedEnabled) -and -not $IsPowerShell7) {
+    Write-Host "ERROR: Shared mode needs PowerShell 7 or later; this is PowerShell $($PSVersionTable.PSVersion)." -ForegroundColor Red
+    Write-Host "  Open PowerShell 7 (pwsh) and run the same command there: & `"$PSCommandPath`" ..." -ForegroundColor Red
+    Write-Host "  Nothing was changed." -ForegroundColor Red
+    exit 1
+}
+if ($null -ne $DataEncryption -and $HasSettingsContent -and -not $IsPowerShell7) {
+    Write-Host "ERROR: Changing -DataEncryption in an existing $SettingsFile needs PowerShell 7 or later (pwsh)." -ForegroundColor Red
+    Write-Host "  Nothing was changed." -ForegroundColor Red
+    exit 1
+}
+if ($SettingsError) {
+    if ($null -ne $Shared -or $null -ne $DataEncryption) {
+        Write-Host "ERROR: $SettingsFile is not valid JSON: $SettingsError" -ForegroundColor Red
+        Write-Host "  Fix or remove it and run this install again. Nothing was changed." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "WARNING: $SettingsFile is not valid JSON ($SettingsError); this install treats shared mode as off." -ForegroundColor Yellow
+}
+
 Write-Host "=== memory-mcp install ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Install root : $InstallRoot"
@@ -437,23 +535,12 @@ Write-Host ""
 
 # --- 5. User settings (survives rebuilds) ---
 if ($null -ne $DataEncryption) {
-    # Load existing settings or start fresh
-    $settings = @{}
-    if (Test-Path $SettingsFile) {
-        $settings = Get-Content $SettingsFile -Raw | ConvertFrom-Json -AsHashtable
+    # The settings read at the start, with every other key kept.
+    if (-not $IsPowerShell7) {
+        # PowerShell 5.1 only gets here without an existing settings.json (checked above): start fresh.
+        $UserSettings = @{}
     }
-
-    # Ensure nested structure
-    if (-not $settings.ContainsKey("MemoryMcp")) {
-        $settings["MemoryMcp"] = @{}
-    }
-    if (-not $settings["MemoryMcp"].ContainsKey("Encryption")) {
-        $settings["MemoryMcp"]["Encryption"] = @{}
-    }
-
-    $settings["MemoryMcp"]["Encryption"]["Enabled"] = $DataEncryption
-
-    $settings | ConvertTo-Json -Depth 10 | Set-Content $SettingsFile -Encoding UTF8
+    Set-SectionEnabled "Encryption" ([bool]$DataEncryption)
     $label = if ($DataEncryption) { "enabled" } else { "disabled" }
     Write-Host "Encryption $label in: $SettingsFile" -ForegroundColor Green
 } elseif (Test-Path $SettingsFile) {

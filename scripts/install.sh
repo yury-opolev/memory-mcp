@@ -46,12 +46,33 @@ SETTINGS_FILE="$DATA_DIR/settings.json"
 SERVICE_PATH_FILE="$DATA_DIR/service-path.txt"
 STOP_MARKER_FILE="$DATA_DIR/service.stopped"
 DATA_DIR_ARGUMENT="--MemoryMcp:DataDirectory=$DATA_DIR"
+LOG_DIR="$DATA_DIR/logs"
 SYSTEMD_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 
 # --- settings.json helpers (python3 or jq; every other key is kept) ---
 json_tool_available() {
     command -v python3 &> /dev/null || command -v jq &> /dev/null
+}
+
+# Prints why settings.json is not valid JSON, or nothing when it is valid, empty, missing, or cannot be checked
+# (neither python3 nor jq).
+settings_error() {
+    if [ ! -s "$SETTINGS_FILE" ] || ! tr -d ' \t\r\n' < "$SETTINGS_FILE" | grep -q .; then
+        return
+    fi
+    if command -v python3 &> /dev/null; then
+        python3 - "$SETTINGS_FILE" <<'PY' || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8-sig") as settings:
+        json.load(settings)
+except ValueError as error:
+    print(error)
+PY
+    elif command -v jq &> /dev/null; then
+        jq empty "$SETTINGS_FILE" 2>&1 > /dev/null | head -n 1 || true
+    fi
 }
 
 # Prints true or false: MemoryMcp.Shared.Enabled in settings.json.
@@ -147,6 +168,36 @@ render_template() {
 
 systemd_user_available() {
     command -v systemctl &> /dev/null && systemctl --user show-environment &> /dev/null
+}
+
+# wait_service_ready <service executable>: runs `status` until the service is ready (exit 0), while it reports that it
+# is still starting (bounded to 120 seconds); prints what it reports. Returns 0 when ready, 2 when it runs but its
+# store failed to start (the error and the log directory are printed), 1 otherwise.
+wait_service_ready() {
+    local service_exe="$1" output exit_code state deadline
+    deadline=$(( $(date +%s) + 120 ))
+    while true; do
+        exit_code=0
+        output="$("$service_exe" status "$DATA_DIR_ARGUMENT" 2>&1)" || exit_code=$?
+        state="$(printf '%s\n' "$output" | head -n 1)"
+        if [ "$exit_code" -eq 0 ]; then
+            printf '%s\n' "$output"
+            return 0
+        fi
+        if [ "$exit_code" -eq 4 ] && [ "$state" = "running, still starting" ] && [ "$(date +%s)" -lt "$deadline" ]; then
+            sleep 0.5
+            continue
+        fi
+        printf '%s\n' "$output"
+        if [ "$state" = "running, startup failed" ]; then
+            echo "ERROR: The memory service runs, but its store failed to start: $(printf '%s\n' "$output" | sed -n 's/^StartupError: //p' | head -n 1)"
+            echo "  See the service log in $LOG_DIR"
+            return 2
+        elif [ "$state" = "running, still starting" ]; then
+            echo "ERROR: The memory service was still starting after 120 seconds. See the service log in $LOG_DIR"
+        fi
+        return 1
+    done
 }
 
 # The <hash> in the launcher name, from the program (`status --print-hash`); empty when it does not report one.
@@ -363,16 +414,39 @@ update_shared_service() {
     echo "  Service path written to: $SERVICE_PATH_FILE"
 
     if ! "$service_exe" stop "$DATA_DIR_ARGUMENT"; then
-        echo "ERROR: The previous memory service did not stop; it keeps running and serving open sessions."
-        echo "  The new version is registered: it runs after the next login, or run this install again."
+        # The stop either got no answer or the service was asked to stop and has not exited. The stop marker is
+        # withdrawn only when the previous service is confirmed alive and serving; otherwise it stays, and open
+        # sessions report the service as stopped until it is started.
+        if "$service_exe" status "$DATA_DIR_ARGUMENT" &> /dev/null; then
+            rm -f "$STOP_MARKER_FILE"
+            echo "ERROR: The previous memory service did not stop and is still running and serving open sessions; the stop was withdrawn."
+            echo "  The new version is registered: it runs after the next login, or run this install again."
+        else
+            echo "ERROR: The previous memory service was asked to stop and has not exited yet. Open sessions report it as stopped."
+            echo "  It stays stopped until it is started. When it has exited, start it with:"
+            echo "    \"$service_exe\" start \"$DATA_DIR_ARGUMENT\""
+            echo "  or run this install again."
+        fi
         exit 1
     fi
 
     rm -f "$STOP_MARKER_FILE"
 
-    if ! "$service_exe" start "$DATA_DIR_ARGUMENT" || ! "$service_exe" status "$DATA_DIR_ARGUMENT"; then
-        echo "ERROR: The memory service did not start. See the service log in $DATA_DIR/logs."
-        echo "  Open sessions wait for it. Start it with: \"$SERVER_EXE\" start \"$DATA_DIR_ARGUMENT\", or run this install again."
+    local readiness=1
+    if "$service_exe" start "$DATA_DIR_ARGUMENT"; then
+        readiness=0
+        wait_service_ready "$service_exe" || readiness=$?
+    fi
+    if [ "$readiness" -eq 2 ]; then
+        echo "  Fix the cause; the running service retries its startup on the next tool call that comes 5 seconds or"
+        echo "  more after the failure. Or run this install again."
+        exit 1
+    fi
+    if [ "$readiness" -ne 0 ]; then
+        echo "ERROR: The memory service did not start. See the service log in $LOG_DIR."
+        echo "  Open sessions wait for it. Start it with:"
+        echo "    \"$service_exe\" start \"$DATA_DIR_ARGUMENT\""
+        echo "  or run this install again."
         exit 1
     fi
 
@@ -427,13 +501,32 @@ if [ -n "$SHARED" ] && ! json_tool_available; then
     exit 1
 fi
 
-WAS_SHARED_ENABLED="$(settings_shared_enabled)"
+# --- settings.json: checked once, before anything is changed ---
+SETTINGS_ERROR="$(settings_error)"
+if [ -n "$SETTINGS_ERROR" ]; then
+    if [ -n "$SHARED" ] || [ -n "$DATA_ENCRYPTION" ]; then
+        echo "ERROR: $SETTINGS_FILE is not valid JSON: $SETTINGS_ERROR"
+        echo "  Fix or remove it and run this install again. Nothing was changed."
+        exit 1
+    fi
+    echo "WARNING: $SETTINGS_FILE is not valid JSON ($SETTINGS_ERROR); this install treats shared mode as off."
+    WAS_SHARED_ENABLED=false
+else
+    WAS_SHARED_ENABLED="$(settings_shared_enabled)"
+fi
 if [ -n "$SHARED" ]; then
     SHARED_ON="$SHARED"
 else
     SHARED_ON="$WAS_SHARED_ENABLED"
 fi
 FINAL_WARNING=""
+
+if [ -n "$DATA_ENCRYPTION" ] && ! json_tool_available && { [ "$SHARED_ON" = true ] || [ "$WAS_SHARED_ENABLED" = true ]; }; then
+    # Without python3 or jq the file could only be overwritten, which would drop the shared-mode setting.
+    echo "ERROR: --data-encryption needs python3 or jq while shared mode is on, to update $SETTINGS_FILE without"
+    echo "  losing its other settings. Install one of them and run this install again. Nothing was changed."
+    exit 1
+fi
 
 echo "=== memory-mcp install ==="
 echo ""
