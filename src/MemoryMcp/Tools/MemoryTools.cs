@@ -1,8 +1,10 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using MemoryMcp.Core.Configuration;
 using MemoryMcp.Core.Services;
+using MemoryMcp.Core.Storage;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
@@ -17,12 +19,14 @@ namespace MemoryMcp.Tools;
 public class MemoryTools
 {
     private readonly IMemoryService memoryService;
+    private readonly IHybridMemorySearch hybridSearch;
     private readonly MemoryMcpOptions options;
     private readonly ILogger<MemoryTools> logger;
 
-    public MemoryTools(IMemoryService memoryService, IOptions<MemoryMcpOptions> options, ILogger<MemoryTools> logger)
+    public MemoryTools(IMemoryService memoryService, IHybridMemorySearch hybridSearch, IOptions<MemoryMcpOptions> options, ILogger<MemoryTools> logger)
     {
         this.memoryService = memoryService;
+        this.hybridSearch = hybridSearch;
         this.options = options.Value;
         this.logger = logger;
     }
@@ -133,30 +137,43 @@ public class MemoryTools
     }
 
     [McpServerTool(Name = "search_memory")]
-    [Description("Search memories by semantic similarity. Returns the most relevant memories ranked by similarity score.")]
+    [Description("Search memories. By default this is a hybrid search: exact words, names and identifiers (keyword) fused with semantic similarity, best first. The result says which search ran; when the embedding service is unavailable it falls back to keyword search and says so.")]
     public async Task<string> SearchMemory(
-        [Description("The search query text. Memories semantically similar to this text will be returned.")] string query,
+        [Description("The search query text. Memories that contain its words or are semantically similar to it will be returned.")] string query,
         [Description("Maximum number of results to return (default: 5).")] int limit = 5,
-        [Description("Minimum similarity score threshold, 0.0 to 1.0 (optional).")] float? minScore = null,
+        [Description("Minimum semantic similarity, 0.0 to 1.0 (optional). Applies to semantic matches only; keyword matches are not thresholded.")] float? minScore = null,
         [Description("Filter by tags: only return memories with at least one matching tag. JSON array of strings (e.g. [\"project\"]).")] string? tags = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             var tagList = ParseTags(tags);
-            var results = await this.memoryService.SearchAsync(query, limit, minScore, tagList, cancellationToken);
+            var requestedMode = this.options.Search.DefaultMode;
+            var search = await this.hybridSearch.SearchAsync(
+                new HybridSearchRequest
+                {
+                    Query = query,
+                    Mode = requestedMode,
+                    Limit = limit,
+                    MinScore = minScore,
+                    Filter = tagList is { Count: > 0 } ? new MemorySearchFilter { Tags = tagList } : MemorySearchFilter.None,
+                },
+                cancellationToken);
+            var searchNote = DescribeSearch(requestedMode, search);
 
-            if (results.Count == 0)
+            if (search.Hits.Count == 0)
             {
-                return "No matching memories found.";
+                return $"No matching memories found ({searchNote}).";
             }
 
             var sb = new StringBuilder();
-            sb.AppendLine($"Found {results.Count} matching memories:\n");
+            sb.AppendLine($"Found {search.Hits.Count} matching memories ({searchNote}):\n");
 
-            foreach (var result in results)
+            foreach (var hit in search.Hits)
             {
-                sb.AppendLine($"--- Memory: {result.MemoryId} (Score: {result.Score:F4}) ---");
+                var result = hit.Memory;
+                var score = hit.Similarity is { } similarity ? similarity.ToString("F4", CultureInfo.InvariantCulture) : "n/a";
+                sb.AppendLine($"--- Memory: {result.MemoryId} (Score: {score}, Match: {DescribeMatch(hit.Match)}) ---");
                 if (result.Title is not null)
                 {
                     sb.AppendLine($"Title: {result.Title}");
@@ -191,6 +208,26 @@ public class MemoryTools
             return $"Error: {ex.Message}";
         }
     }
+
+    private static string DescribeSearch(MemorySearchMode requestedMode, HybridSearchResult search)
+    {
+        var ran = ModeName(search.EffectiveMode) + " search";
+        return search.Fallback is null ? ran : $"{ran}; {ModeName(requestedMode)} was not possible: {search.Fallback}";
+    }
+
+    private static string ModeName(MemorySearchMode mode) => mode switch
+    {
+        MemorySearchMode.Dense => "semantic",
+        MemorySearchMode.Keyword => "keyword",
+        _ => "hybrid",
+    };
+
+    private static string DescribeMatch(MemoryMatchKind match) => match switch
+    {
+        MemoryMatchKind.Keyword => "keyword",
+        MemoryMatchKind.Both => "semantic+keyword",
+        _ => "semantic",
+    };
 
     private static List<string>? ParseTags(string? tagsJson)
     {

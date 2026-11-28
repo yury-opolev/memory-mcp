@@ -213,13 +213,13 @@ Permanently delete a memory and all its chunks.
 
 ### `search_memory`
 
-Semantic search across all stored memories. Returns results ranked by cosine similarity.
+Searches all stored memories, best first. The default is a **hybrid** search: a keyword (BM25) list for exact words, names and identifiers fused with the semantic (cosine similarity) list. Set `MemoryMcp:Search:DefaultMode` to `Dense` or `Keyword` to change it. The first line of the result names the search that ran; when the query cannot be embedded (Ollama unreachable) a hybrid search falls back to keyword search and says so. Each result shows its similarity (`n/a` for a keyword-only match) and which list found it.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | yes | Natural-language search text |
 | `limit` | int | no | Max results (default: 5) |
-| `minScore` | float | no | Minimum similarity threshold, 0.0--1.0 |
+| `minScore` | float | no | Minimum similarity threshold, 0.0--1.0. Applies to semantic matches only; keyword matches are not thresholded |
 | `tags` | string | no | Filter: only return memories with at least one matching tag |
 
 Long results are truncated at 1800 characters with a hint to use `get_memory` for the full text.
