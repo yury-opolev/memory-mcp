@@ -342,7 +342,7 @@ public void Select_ReturnsRole(string[] args, bool shared, ServerRole expected)
 No code. Each item is a recorded command and its observed result; anything that fails goes back to the owning task.
 
 - [ ] **Step 1: Back up** `%LOCALAPPDATA%\memory-mcp\data` and `bin` to a dated folder.
-- [ ] **Step 2: Install** with `scripts\install.ps1 -Rebuild -SkipOllama -Shared $true` (sessions that are open keep their old standalone server until restarted; restart them once).
+- [ ] **Step 2: Install** with `scripts\install.ps1 -Rebuild -SkipOllama -Shared $true`, **with every agent session closed** and from a plain PowerShell 7 terminal. The first switch-on replaces `bin`, which open sessions lock; with a session open the script installs the service but refuses to enable shared mode and says so. Confirm `MemoryMcp status` exits 0, then start the sessions again. (Corrected after the final review: the original text said open sessions could simply be restarted afterwards.)
 - [ ] **Step 3: Check the four clients** (Claude Code, Copilot CLI, OpenCode, coda) each run a `search_memory` call with their existing config.
 - [ ] **Step 4: One owner of the database:** `Get-CimInstance Win32_Process -Filter "Name='MemoryMcp.exe'"` shows one `serve` process and one relay per session; only the `serve` process has `memory.db` open.
 - [ ] **Step 5: Not reachable by another account:** from a second local Windows account (or `runas`), connecting to the pipe is refused; `netstat -ano` shows no listener owned by the service.
@@ -352,3 +352,6 @@ No code. Each item is a recorded command and its observed result; anything that 
 - [ ] **Step 9: Measurements:** `MemoryMcp status` shows call counts and wait/run figures after the calls above.
 - [ ] **Step 10: coda and the Bridge:** start a coda session first after `stop`/`start` so that coda triggers the service start; restart the Cortex Bridge; the service is still running afterwards.
 - [ ] **Step 11: Core untouched:** `git diff --stat origin/main -- src/MemoryMcp.Core` is empty.
+- [ ] **Step 12: Elevated session** (added after the final review): from an administrator terminal, run a relay against the non-elevated service; it must answer at once with the elevation message, not wait 30 s, and must not start a second service.
+- [ ] **Step 13: Real logon start** (added after the final review): log off and on again; the scheduled task starts the service with no console window, and `MemoryMcp status` exits 0 before any session is opened.
+- [ ] **Step 14: Stop during a call** (added after the final review): run `MemoryMcp stop` while a `search_memory` call is in flight; the call either returns its real result or the "may or may not have completed" message, never hangs, and the session recovers after `start`.
