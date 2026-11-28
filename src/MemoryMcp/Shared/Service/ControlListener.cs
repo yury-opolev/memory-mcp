@@ -50,7 +50,7 @@ public sealed class ControlListener
         return SessionListener.AcceptConnectionsAsync(
             this.pipeName,
             SessionListener.CreateServerPipe,
-            pipe => this.HandleAsync(pipe, ct),
+            this.HandleAsync,
             this.logger,
             ct);
     }

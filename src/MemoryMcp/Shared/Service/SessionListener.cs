@@ -98,23 +98,31 @@ public sealed class SessionListener
             return Task.FromException(exception);
         }
 
-        return AcceptConnectionsAsync(this.pipeName, this.pipeFactory, pipe => this.RunSessionAsync(pipe, options, ct), this.logger, ct);
+        return AcceptConnectionsAsync(
+            this.pipeName,
+            this.pipeFactory,
+            (pipe, connectionToken) => this.RunSessionAsync(pipe, options, connectionToken),
+            this.logger,
+            ct);
     }
 
     /// <summary>
     /// The accept loop both listeners share: keeps one pipe instance waiting, hands each connection to
     /// <paramref name="handleConnection"/> on its own task, and on cancellation waits for those tasks to end.
+    /// When the loop itself fails (a pipe cannot be created, an unexpected error while waiting) it ends the open
+    /// connections at once and faults, so the failure is reported now and not when the last client leaves.
     /// </summary>
     internal static async Task AcceptConnectionsAsync(
         string pipeName,
         Func<string, PipeOptions, NamedPipeServerStream> pipeFactory,
-        Func<NamedPipeServerStream, Task> handleConnection,
+        Func<NamedPipeServerStream, CancellationToken, Task> handleConnection,
         ILogger logger,
         CancellationToken ct)
     {
         RemoveStaleSocket(pipeName);
         var connections = new ConcurrentDictionary<Task, byte>();
         NamedPipeServerStream? pipe = pipeFactory(pipeName, ServerPipeOptions);
+        using var connectionsStopping = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
             while (true)
@@ -139,7 +147,7 @@ public sealed class SessionListener
                 // The connection task owns the connected pipe from here; the finally block must not dispose it.
                 var connected = pipe;
                 pipe = null;
-                var connection = Task.Run(() => handleConnection(connected), CancellationToken.None);
+                var connection = Task.Run(() => handleConnection(connected, connectionsStopping.Token), CancellationToken.None);
                 connections.TryAdd(connection, 0);
                 _ = connection.ContinueWith(
                     finished =>
@@ -163,6 +171,8 @@ public sealed class SessionListener
                 await pipe.DisposeAsync().ConfigureAwait(false);
             }
 
+            // On cancellation this is the normal drain; on a failure it ends the sessions so the fault surfaces now.
+            await connectionsStopping.CancelAsync().ConfigureAwait(false);
             await Task.WhenAll(connections.Keys).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }

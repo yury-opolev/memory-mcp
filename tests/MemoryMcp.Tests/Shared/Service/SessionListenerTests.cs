@@ -254,6 +254,34 @@ public sealed class SessionListenerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Listener_WhenALaterPipeCannotBeCreated_FaultsWhileASessionIsOpen()
+    {
+        var created = 0;
+        var listener = new SessionListener(
+            this.pipeName,
+            this.FakeServices(),
+            NullLoggerFactory.Instance,
+            (name, options) => Interlocked.Increment(ref created) == 1
+                ? SessionListener.CreateServerPipe(name, options)
+                : throw new IOException("no more pipes"));
+        using var stopping = new CancellationTokenSource();
+        var run = listener.RunAsync(stopping.Token);
+        try
+        {
+            await using var openSession = await McpPipeClient.ConnectPipeAsync(this.pipeName, Token);
+
+            var failure = await Assert.ThrowsAsync<IOException>(() => run.WaitAsync(TimeSpan.FromSeconds(10), Token));
+            Assert.Equal("no more pipes", failure.Message);
+            Assert.Equal(0, listener.ActiveSessions);
+        }
+        finally
+        {
+            await stopping.CancelAsync();
+            await run.WaitAsync(TestTimeout, Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+        }
+    }
+
+    [Fact]
     public async Task Session_ClientLeavesMidHandshake_ListenerKeepsServing()
     {
         var listener = this.NewListener(this.FakeServices());
