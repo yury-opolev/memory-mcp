@@ -1,81 +1,24 @@
-using MemoryMcp.Core.Configuration;
-using MemoryMcp.Core.Security;
-using MemoryMcp.Core.Services;
-using MemoryMcp.Core.Storage;
-using MemoryMcp.Storage;
+using MemoryMcp.Hosting;
+using MemoryMcp.Shared;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
-var builder = Host.CreateApplicationBuilder(args);
-
-// Load user settings from data directory (survives rebuilds)
-var dataDir = builder.Configuration[$"{MemoryMcpOptions.SectionName}:DataDirectory"]
-    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "memory-mcp");
-var userSettings = Path.Combine(dataDir, "settings.json");
-if (File.Exists(userSettings))
+ServerRole role;
+try
 {
-    builder.Configuration.AddJsonFile(userSettings, optional: true, reloadOnChange: false);
+    var configuration = ServerConfiguration.Build(args);
+    var sharedOptions = configuration.GetSection(SharedOptions.SectionName).Get<SharedOptions>() ?? new SharedOptions();
+    role = RoleSelector.Select(args, sharedOptions.Enabled);
+}
+catch (ArgumentException exception)
+{
+    Console.Error.WriteLine(exception.Message);
+    return 2;
 }
 
-// Register MemoryMcp.Core services (chunking, embedding, storage, memory service)
-builder.Services.AddMemoryMcpCore(builder.Configuration);
-
-// Register MCP server with stdio transport
-builder.Services
-    .AddMcpServer()
-    .WithStdioServerTransport()
-    .WithToolsFromAssembly();
-
-var host = builder.Build();
-
-// Initialize the memory store (create DB schema, directories)
-using (var scope = host.Services.CreateScope())
+if (role == ServerRole.Standalone)
 {
-    // An encrypted database written by the SQLCipher engine of earlier releases is converted once to the
-    // format of the current engine (SQLite3 Multiple Ciphers); the original stays beside it as a backup.
-    var memoryOptions = scope.ServiceProvider.GetRequiredService<IOptions<MemoryMcpOptions>>().Value;
-    if (memoryOptions.Encryption.Enabled)
-    {
-        var key = await scope.ServiceProvider.GetRequiredService<IKeyStore>().GetOrCreateKeyAsync();
-        SqlCipherDatabaseConverter.ConvertIfNeeded(
-            memoryOptions.DatabasePath,
-            Convert.ToBase64String(key),
-            scope.ServiceProvider.GetRequiredService<ILogger<Program>>());
-    }
-
-    var store = scope.ServiceProvider.GetRequiredService<IMemoryStore>();
-    await store.InitializeAsync();
-
-    // Startup health check: verify Ollama connectivity and model availability
-    var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
-    if (embeddingService is OllamaEmbeddingService ollamaService)
-    {
-        var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-        var isRunning = await ollamaService.IsAvailableAsync();
-        if (!isRunning)
-        {
-            logger.LogWarning(
-                "Ollama is not reachable. Embedding-dependent tools (ingest_memory, update_memory, search_memory) will fail. " +
-                "Install Ollama: https://ollama.com/download");
-        }
-        else
-        {
-            var modelAvailable = await ollamaService.IsModelAvailableAsync();
-            if (!modelAvailable)
-            {
-                logger.LogWarning(
-                    "Ollama is running but the configured embedding model may not be pulled. " +
-                    "If embedding fails, run: ollama pull <model-name>");
-            }
-            else
-            {
-                logger.LogInformation("Ollama health check passed: server reachable, model available.");
-            }
-        }
-    }
+    return await StandaloneServer.RunAsync(args);
 }
 
-await host.RunAsync();
+Console.Error.WriteLine($"Role '{role}' is not implemented yet.");
+return 2;
