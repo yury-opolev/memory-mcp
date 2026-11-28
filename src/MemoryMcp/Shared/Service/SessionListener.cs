@@ -24,6 +24,7 @@ public sealed class SessionListener
     private readonly ILoggerFactory loggers;
     private readonly ILogger<SessionListener> logger;
     private readonly Func<string, PipeOptions, NamedPipeServerStream> pipeFactory;
+    private readonly Func<NamedPipeServerStream, CancellationToken, Task> waitForConnection;
     private int activeSessions;
 
     public SessionListener(string pipeName, IServiceProvider services, ILoggerFactory loggers)
@@ -33,16 +34,37 @@ public sealed class SessionListener
 
     /// <summary>Creates a listener whose pipes come from <paramref name="pipeFactory"/> (a test seam).</summary>
     public SessionListener(string pipeName, IServiceProvider services, ILoggerFactory loggers, Func<string, PipeOptions, NamedPipeServerStream> pipeFactory)
+        : this(pipeName, services, loggers, pipeFactory, WaitForConnectionAsync)
+    {
+    }
+
+    /// <summary>
+    /// Creates a listener whose pipes come from <paramref name="pipeFactory"/> and whose wait for a client on a pipe is
+    /// <paramref name="waitForConnection"/> (test seams; the pipe type is sealed, so a refused client is simulated here).
+    /// </summary>
+    public SessionListener(
+        string pipeName,
+        IServiceProvider services,
+        ILoggerFactory loggers,
+        Func<string, PipeOptions, NamedPipeServerStream> pipeFactory,
+        Func<NamedPipeServerStream, CancellationToken, Task> waitForConnection)
     {
         this.pipeName = pipeName;
         this.services = services;
         this.loggers = loggers;
         this.logger = loggers.CreateLogger<SessionListener>();
         this.pipeFactory = pipeFactory;
+        this.waitForConnection = waitForConnection;
     }
 
     /// <summary>The number of connected sessions.</summary>
     public int ActiveSessions => Volatile.Read(ref this.activeSessions);
+
+    /// <summary>Waits for a client on <paramref name="pipe"/>; the default of the accept loop.</summary>
+    public static Task WaitForConnectionAsync(NamedPipeServerStream pipe, CancellationToken ct)
+    {
+        return pipe.WaitForConnectionAsync(ct);
+    }
 
     public static NamedPipeServerStream CreateServerPipe(string pipeName, PipeOptions options)
     {
@@ -101,6 +123,7 @@ public sealed class SessionListener
         return AcceptConnectionsAsync(
             this.pipeName,
             this.pipeFactory,
+            this.waitForConnection,
             (pipe, connectionToken) => this.RunSessionAsync(pipe, options, connectionToken),
             this.logger,
             ct);
@@ -110,11 +133,13 @@ public sealed class SessionListener
     /// The accept loop both listeners share: keeps one pipe instance waiting, hands each connection to
     /// <paramref name="handleConnection"/> on its own task, and on cancellation waits for those tasks to end.
     /// When the loop itself fails (a pipe cannot be created, an unexpected error while waiting) it ends the open
-    /// connections at once and faults, so the failure is reported now and not when the last client leaves.
+    /// connections at once and faults, so the failure is reported now and not when the last client leaves. A client
+    /// that is refused (on Unix, one of another account) only costs that pipe instance.
     /// </summary>
     internal static async Task AcceptConnectionsAsync(
         string pipeName,
         Func<string, PipeOptions, NamedPipeServerStream> pipeFactory,
+        Func<NamedPipeServerStream, CancellationToken, Task> waitForConnection,
         Func<NamedPipeServerStream, CancellationToken, Task> handleConnection,
         ILogger logger,
         CancellationToken ct)
@@ -129,11 +154,21 @@ public sealed class SessionListener
             {
                 try
                 {
-                    await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+                    await waitForConnection(pipe, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     break;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // A client of another account (Unix checks the peer after accepting). It is not served, and it
+                    // must not stop the listener: that would let another account stop this service. The exception
+                    // text names the other user id, so only the event is logged.
+                    logger.LogWarning("A connection from another account was refused");
+                    await pipe.DisposeAsync().ConfigureAwait(false);
+                    pipe = pipeFactory(pipeName, ServerPipeOptions);
+                    continue;
                 }
                 catch (IOException exception)
                 {

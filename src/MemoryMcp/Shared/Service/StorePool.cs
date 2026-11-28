@@ -6,7 +6,8 @@ namespace MemoryMcp.Shared.Service;
 
 /// <summary>
 /// A pool of independent store lanes. A lane serves one call at a time; further calls wait their turn.
-/// Lane 0 runs the startup sequence, the others are created after it in the background.
+/// Lane 0 runs the startup sequence, the others are created after it in the background. A failed startup is not
+/// final: the first call that arrives <see cref="StartupRetryDelay"/> or more after the failure starts a new attempt.
 /// </summary>
 public sealed class StorePool : IAsyncDisposable
 {
@@ -15,6 +16,9 @@ public sealed class StorePool : IAsyncDisposable
 
     /// <summary>A wait for a lane longer than this is logged as a warning.</summary>
     public static readonly TimeSpan SlowWaitThreshold = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long after a failed startup a call may trigger the next attempt; calls before that fail at once.</summary>
+    public static readonly TimeSpan StartupRetryDelay = TimeSpan.FromSeconds(5);
 
     private const int SqliteBusy = 5;
     private const int SqliteLocked = 6;
@@ -25,11 +29,16 @@ public sealed class StorePool : IAsyncDisposable
     private readonly ILogger<StorePool> logger;
     private readonly TimeProvider time;
     private readonly Channel<StoreLane> freeLanes = Channel.CreateUnbounded<StoreLane>();
-    private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource disposing = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource shutdown = new();
     private readonly object gate = new();
-    private Task? creationTask;
-    private volatile string? startupError;
+
+    // Guarded by gate: the running or last startup attempt, the creation of the other lanes, and the outcome.
+    private Task? startupAttempt;
+    private Task? otherLanesCreation;
+    private bool isStarted;
+    private long startupFailedTimestamp;
+    private string? startupError;
     private bool isDisposed;
 
     public StorePool(IStoreLaneFactory factory, int maxParallelCalls, CallMetrics metrics, ILogger<StorePool> logger, TimeProvider time)
@@ -42,22 +51,40 @@ public sealed class StorePool : IAsyncDisposable
     }
 
     /// <summary>True once lane 0 finished the startup sequence successfully.</summary>
-    public bool IsReady => this.ready.Task.IsCompletedSuccessfully && this.startupError is null;
+    public bool IsReady
+    {
+        get
+        {
+            lock (this.gate)
+            {
+                return this.isStarted;
+            }
+        }
+    }
 
-    /// <summary>The message of the startup failure, or null when startup has not failed.</summary>
-    public string? StartupError => this.startupError;
+    /// <summary>The message of the latest startup failure, or null when startup has not failed or later succeeded.</summary>
+    public string? StartupError
+    {
+        get
+        {
+            lock (this.gate)
+            {
+                return this.startupError;
+            }
+        }
+    }
 
     /// <summary>Begins creating the lanes in the background: lane 0 with startup, then the rest.</summary>
     public void Start()
     {
         lock (this.gate)
         {
-            if (this.isDisposed || this.creationTask is not null)
+            if (this.isDisposed || this.startupAttempt is not null)
             {
                 return;
             }
 
-            this.creationTask = Task.Run(() => this.CreateLanesAsync(this.shutdown.Token));
+            this.startupAttempt = this.StartStartupAttempt();
         }
     }
 
@@ -106,7 +133,7 @@ public sealed class StorePool : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        Task? creation;
+        List<Task> creations = [];
         lock (this.gate)
         {
             if (this.isDisposed)
@@ -115,21 +142,21 @@ public sealed class StorePool : IAsyncDisposable
             }
 
             this.isDisposed = true;
-            creation = this.creationTask;
+            foreach (var creation in new[] { this.startupAttempt, this.otherLanesCreation })
+            {
+                if (creation is not null)
+                {
+                    creations.Add(creation);
+                }
+            }
         }
 
         this.freeLanes.Writer.TryComplete();
         await this.shutdown.CancelAsync().ConfigureAwait(false);
-        this.ready.TrySetCanceled();
-        if (creation is not null)
+        this.disposing.TrySetResult();
+        foreach (var creation in creations)
         {
-            try
-            {
-                await creation.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
+            await creation.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
 
         while (this.freeLanes.Reader.TryRead(out var lane))
@@ -182,51 +209,117 @@ public sealed class StorePool : IAsyncDisposable
         }
     }
 
+    private static ServiceNotReadyException StartupFailed(string? error)
+    {
+        return new ServiceNotReadyException($"The memory service failed to start: {error}");
+    }
+
+    /// <summary>
+    /// Returns once startup has succeeded. While an attempt runs, waits for it (bounded by
+    /// <see cref="ReadinessTimeout"/>). After a failure, fails at once within <see cref="StartupRetryDelay"/>; later,
+    /// starts one new attempt (concurrent callers share it) and waits for that.
+    /// </summary>
     private async Task WaitUntilReadyAsync(CancellationToken ct)
     {
-        if (!this.ready.Task.IsCompleted)
+        Task attempt;
+        lock (this.gate)
         {
-            try
-            {
-                await this.ready.Task.WaitAsync(ReadinessTimeout, this.time, ct).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                throw new ServiceNotReadyException("The memory service is still starting. Retry the call shortly.");
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            if (this.isDisposed)
             {
                 throw new ObjectDisposedException(nameof(StorePool));
             }
+
+            if (this.isStarted)
+            {
+                return;
+            }
+
+            if (this.startupAttempt is { IsCompleted: true } && this.startupError is not null)
+            {
+                if (this.time.GetElapsedTime(this.startupFailedTimestamp) < StartupRetryDelay)
+                {
+                    throw StartupFailed(this.startupError);
+                }
+
+                this.logger.LogInformation("Retrying the memory service startup");
+                this.startupAttempt = this.StartStartupAttempt();
+            }
+
+            this.startupAttempt ??= this.StartStartupAttempt();
+            attempt = this.startupAttempt;
         }
 
-        if (this.startupError is { } error)
+        try
         {
-            throw new ServiceNotReadyException($"The memory service failed to start: {error}");
+            await Task.WhenAny(attempt, this.disposing.Task).WaitAsync(ReadinessTimeout, this.time, ct).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            throw new ServiceNotReadyException("The memory service is still starting. Retry the call shortly.");
+        }
+
+        lock (this.gate)
+        {
+            if (this.isDisposed)
+            {
+                throw new ObjectDisposedException(nameof(StorePool));
+            }
+
+            if (!this.isStarted)
+            {
+                throw StartupFailed(this.startupError);
+            }
         }
     }
 
-    private async Task CreateLanesAsync(CancellationToken ct)
+    /// <summary>Runs one startup attempt in the background. Called under the gate.</summary>
+    private Task StartStartupAttempt()
     {
+        return Task.Run(() => this.RunStartupAsync(this.shutdown.Token));
+    }
+
+    /// <summary>
+    /// Creates lane 0 with the startup sequence. On success it clears the startup error and creates the other lanes in
+    /// the background; on a failure it records the error and its time (and logs it once). It never throws.
+    /// </summary>
+    private async Task RunStartupAsync(CancellationToken ct)
+    {
+        StoreLane first;
         try
         {
-            var first = await this.factory.CreateAsync(true, ct).ConfigureAwait(false);
-            this.ReturnLane(first);
-            this.ready.TrySetResult();
+            first = await this.factory.CreateAsync(true, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            this.ready.TrySetCanceled();
             return;
         }
         catch (Exception exception)
         {
             this.logger.LogError(exception, "The memory service failed to start");
-            this.startupError = exception.Message;
-            this.ready.TrySetResult();
+            lock (this.gate)
+            {
+                this.startupError = exception.Message;
+                this.startupFailedTimestamp = this.time.GetTimestamp();
+            }
+
             return;
         }
 
+        lock (this.gate)
+        {
+            this.isStarted = true;
+            this.startupError = null;
+            if (!this.isDisposed)
+            {
+                this.otherLanesCreation = Task.Run(() => this.CreateOtherLanesAsync(ct));
+            }
+        }
+
+        this.ReturnLane(first);
+    }
+
+    private async Task CreateOtherLanesAsync(CancellationToken ct)
+    {
         for (var index = 1; index < this.laneCount; index++)
         {
             try

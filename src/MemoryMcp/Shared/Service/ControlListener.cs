@@ -50,6 +50,7 @@ public sealed class ControlListener
         return SessionListener.AcceptConnectionsAsync(
             this.pipeName,
             SessionListener.CreateServerPipe,
+            SessionListener.WaitForConnectionAsync,
             this.HandleAsync,
             this.logger,
             ct);
@@ -94,11 +95,23 @@ public sealed class ControlListener
         try
         {
             var command = await ReadCommandAsync(pipe, timeout.Token).ConfigureAwait(false);
+            string? error = null;
             if (command == StopCommand)
             {
-                isStopRequested = true;
                 this.logger.LogInformation("Stop requested on the control pipe");
-                StopMarker.Set(this.dataDirectory);
+
+                // The marker is written first: a service that stopped without it would be started again at the next
+                // logon or by a relay, undoing the stop. When it cannot be written the service keeps running.
+                try
+                {
+                    StopMarker.Set(this.dataDirectory);
+                    isStopRequested = true;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    this.logger.LogError(exception, "The stop marker could not be written; the service keeps running");
+                    error = $"The stop marker could not be written, so the service keeps running: {exception.Message}";
+                }
             }
             else if (command != StatusCommand)
             {
@@ -106,7 +119,7 @@ public sealed class ControlListener
                 return;
             }
 
-            var answer = Encoding.UTF8.GetBytes(this.Snapshot().ToJson() + "\n");
+            var answer = Encoding.UTF8.GetBytes(this.Snapshot(error).ToJson() + "\n");
             await pipe.WriteAsync(answer, timeout.Token).ConfigureAwait(false);
             await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);
 
@@ -134,7 +147,7 @@ public sealed class ControlListener
         }
     }
 
-    private ControlResponse Snapshot()
+    private ControlResponse Snapshot(string? error)
     {
         return new ControlResponse(
             MemoryServiceHost.Version,
@@ -142,6 +155,7 @@ public sealed class ControlListener
             this.sessions.ActiveSessions,
             this.pool.IsReady,
             this.pool.StartupError,
-            this.metrics.Snapshot());
+            this.metrics.Snapshot(),
+            error);
     }
 }

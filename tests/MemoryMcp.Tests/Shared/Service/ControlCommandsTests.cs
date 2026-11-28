@@ -70,6 +70,105 @@ public sealed class ControlCommandsTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Status_StillStarting_SaysSo_AndExitsFour()
+    {
+        this.StartControlListener(FakeControlListener.CreateResponse(4242) with { Ready = false });
+
+        var exitCode = await StatusCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, Token);
+
+        Assert.Equal(StatusCommand.NotReadyExitCode, exitCode);
+        Assert.Equal(4, exitCode);
+        Assert.Equal("running, still starting", this.Lines()[0]);
+    }
+
+    [Fact]
+    public async Task Status_StartupFailed_PrintsTheErrorAndTheLogDirectory_AndExitsFour()
+    {
+        this.StartControlListener(FakeControlListener.CreateResponse(4242) with { Ready = false, StartupError = "database is locked" });
+
+        var exitCode = await StatusCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, Token);
+
+        Assert.Equal(4, exitCode);
+        var lines = this.Lines();
+        Assert.Equal("running, startup failed", lines[0]);
+        Assert.Contains("StartupError: database is locked", lines);
+        Assert.Contains("LogDirectory: " + SharedPaths.LogDirectory(this.dataDirectory), lines);
+    }
+
+    [Fact]
+    public async Task Status_ServiceAcceptsButDoesNotAnswer_ExitsFour()
+    {
+        this.StartControlListener(FakeControlListener.CreateResponse(4242), isAnswering: false);
+
+        var exitCode = await StatusCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, TimeSpan.FromMilliseconds(500), Token);
+
+        Assert.Equal(4, exitCode);
+        Assert.Equal("running, not answering", this.Lines()[0]);
+    }
+
+    [Fact]
+    public async Task Stop_ServiceAcceptsButDoesNotAnswer_ReportsNoAnswer_NotNotRunning()
+    {
+        this.StartControlListener(FakeControlListener.CreateResponse(4242), isAnswering: false);
+
+        var exitCode = await StopCommand.RunAsync(
+            this.dataDirectory, this.controlPipe, this.output, this.error, TimeSpan.FromMilliseconds(500), StopCommand.ExitTimeout, Token);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("did not answer the stop request", this.error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("not running", this.output.ToString() + this.error.ToString(), StringComparison.Ordinal);
+        Assert.False(StopMarker.Exists(this.dataDirectory));
+    }
+
+    [Fact]
+    public async Task Stop_ServiceAnswersButDoesNotExit_SaysItWasAskedToStop_AndGivesTheStartCommand()
+    {
+        // This test's own process stands in for a service that answered and keeps running.
+        this.StartControlListener(FakeControlListener.CreateResponse(Environment.ProcessId));
+
+        var exitCode = await StopCommand.RunAsync(
+            this.dataDirectory, this.controlPipe, this.output, this.error, ControlClient.AnswerTimeout, TimeSpan.FromMilliseconds(500), Token);
+
+        Assert.Equal(1, exitCode);
+        var message = this.error.ToString();
+        Assert.Contains("was asked to stop and has not exited", message, StringComparison.Ordinal);
+        Assert.Contains("Open sessions report it as stopped", message, StringComparison.Ordinal);
+        Assert.Contains(ServiceCommandLines.Start(this.dataDirectory), message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Stop_ServiceRefuses_ExitsOne_WithTheReason()
+    {
+        this.StartControlListener(FakeControlListener.CreateResponse(4242) with { Error = "The stop marker could not be written" });
+
+        var exitCode = await StopCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, this.error, Token);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("The stop marker could not be written", this.error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Stop_NothingListening_NamesTheFullStartCommand()
+    {
+        var exitCode = await StopCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, this.error, Token);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains(
+            "`MemoryMcp start --MemoryMcp:DataDirectory=\"" + this.dataDirectory + "\"`",
+            this.output.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartFailureMessage_NamesPipeAccessOnlyForAPipeFailure()
+    {
+        var failure = new InvalidOperationException("the embedder settings are invalid");
+
+        Assert.Equal("The memory service could not start: the embedder settings are invalid", ServiceCommand.StartFailureMessage(failure, isPipeCreationFailure: false));
+        Assert.Contains("current-user-only", ServiceCommand.StartFailureMessage(failure, isPipeCreationFailure: true), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Status_NotRunning_SaysWhetherStopped_AndExitsThree()
     {
         var exitCode = await StatusCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, Token);
@@ -201,7 +300,12 @@ public sealed class ControlCommandsTests : IAsyncDisposable
 
     private FakeControlListener StartControlListener(int processId)
     {
-        var listener = new FakeControlListener(this.controlPipe, FakeControlListener.CreateResponse(processId));
+        return this.StartControlListener(FakeControlListener.CreateResponse(processId));
+    }
+
+    private FakeControlListener StartControlListener(ControlResponse response, bool isAnswering = true)
+    {
+        var listener = new FakeControlListener(this.controlPipe, response, isAnswering);
         this.cleanup.Add(listener);
         return listener;
     }

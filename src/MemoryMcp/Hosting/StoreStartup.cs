@@ -9,7 +9,11 @@ using Microsoft.Extensions.Options;
 
 namespace MemoryMcp.Hosting;
 
-/// <summary>Prepares the memory store: format conversion, schema initialisation and the embedder health check.</summary>
+/// <summary>
+/// Prepares the memory store: format conversion, schema initialisation and the embedder health check. Each step that
+/// takes a token gets <c>cancellationToken</c>, so a service asked to stop during a long first start does not wait
+/// for the whole startup.
+/// </summary>
 public static class StoreStartup
 {
     public static async Task RunAsync(IServiceProvider services, CancellationToken cancellationToken = default)
@@ -21,7 +25,7 @@ public static class StoreStartup
         var memoryOptions = scope.ServiceProvider.GetRequiredService<IOptions<MemoryMcpOptions>>().Value;
         if (memoryOptions.Encryption.Enabled)
         {
-            var key = await scope.ServiceProvider.GetRequiredService<IKeyStore>().GetOrCreateKeyAsync().ConfigureAwait(false);
+            var key = await scope.ServiceProvider.GetRequiredService<IKeyStore>().GetOrCreateKeyAsync(cancellationToken).ConfigureAwait(false);
             SqlCipherDatabaseConverter.ConvertIfNeeded(
                 memoryOptions.DatabasePath,
                 Convert.ToBase64String(key),
@@ -29,14 +33,14 @@ public static class StoreStartup
         }
 
         var store = scope.ServiceProvider.GetRequiredService<IMemoryStore>();
-        await store.InitializeAsync().ConfigureAwait(false);
+        await store.InitializeAsync(cancellationToken).ConfigureAwait(false);
 
         // Startup health check: verify Ollama connectivity and model availability
         var embeddingService = scope.ServiceProvider.GetRequiredService<IEmbeddingService>();
         if (embeddingService is OllamaEmbeddingService ollamaService)
         {
             var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-            var isRunning = await ollamaService.IsAvailableAsync().ConfigureAwait(false);
+            var isRunning = await ollamaService.IsAvailableAsync(cancellationToken).ConfigureAwait(false);
             if (!isRunning)
             {
                 logger.LogWarning(
@@ -45,7 +49,7 @@ public static class StoreStartup
             }
             else
             {
-                var modelAvailable = await ollamaService.IsModelAvailableAsync().ConfigureAwait(false);
+                var modelAvailable = await ollamaService.IsModelAvailableAsync(cancellationToken).ConfigureAwait(false);
                 if (!modelAvailable)
                 {
                     logger.LogWarning(

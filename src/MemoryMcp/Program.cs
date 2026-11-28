@@ -4,12 +4,12 @@ using MemoryMcp.Shared.Relay;
 using MemoryMcp.Shared.Service;
 using Microsoft.Extensions.Configuration;
 
-IConfigurationRoot configuration;
+// A settings problem (such as an unusable data directory) surfaces as itself; only an unknown command is a usage error.
+var configuration = ServerConfiguration.Build(args);
+var sharedOptions = configuration.GetSection(SharedOptions.SectionName).Get<SharedOptions>() ?? new SharedOptions();
 ServerRole role;
 try
 {
-    configuration = ServerConfiguration.Build(args);
-    var sharedOptions = configuration.GetSection(SharedOptions.SectionName).Get<SharedOptions>() ?? new SharedOptions();
     role = RoleSelector.Select(args, sharedOptions.Enabled);
 }
 catch (ArgumentException exception)

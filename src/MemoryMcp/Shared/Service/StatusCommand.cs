@@ -7,8 +7,20 @@ namespace MemoryMcp.Shared.Service;
 /// <summary><c>MemoryMcp status</c>: prints what the service reports, or that it is not running.</summary>
 public static class StatusCommand
 {
+    /// <summary>The service runs and its store is ready.</summary>
     public const int RunningExitCode = 0;
+
+    /// <summary>No service is running.</summary>
     public const int NotRunningExitCode = 3;
+
+    /// <summary>A service runs but is not ready: still starting, its startup failed, or it does not answer.</summary>
+    public const int NotReadyExitCode = 4;
+
+    public const string ReadyLine = "running";
+    public const string StartingLine = "running, still starting";
+    public const string StartupFailedLine = "running, startup failed";
+    public const string NotAnsweringLine = "running, not answering";
+    public const string NotRunningLine = "not running";
 
     /// <summary>Prints only the launcher hash of the data directory (for the install scripts) and contacts no service.</summary>
     public const string PrintHashOption = "--print-hash";
@@ -47,21 +59,45 @@ public static class StatusCommand
         return 0;
     }
 
-    /// <summary>Exits 0 and prints the <see cref="ControlResponse"/> fields as lines when running; else exits 3.</summary>
-    public static async Task<int> RunAsync(string dataDirectory, string controlPipeName, TextWriter output, CancellationToken ct)
+    public static Task<int> RunAsync(string dataDirectory, string controlPipeName, TextWriter output, CancellationToken ct)
     {
-        var response = await ControlClient.SendAsync(controlPipeName, ControlListener.StatusCommand, ct).ConfigureAwait(false);
-        if (response is null)
+        return RunAsync(dataDirectory, controlPipeName, output, ControlClient.AnswerTimeout, ct);
+    }
+
+    /// <summary>
+    /// Prints the state as the first line, then the <see cref="ControlResponse"/> fields: exits 0 when the service is
+    /// ready, 4 when it runs but is still starting, failed to start or does not answer within
+    /// <paramref name="answerTimeout"/>, and 3 when it is not running.
+    /// </summary>
+    public static async Task<int> RunAsync(string dataDirectory, string controlPipeName, TextWriter output, TimeSpan answerTimeout, CancellationToken ct)
+    {
+        var reply = await ControlClient.ExchangeAsync(controlPipeName, ControlListener.StatusCommand, answerTimeout, ct).ConfigureAwait(false);
+        if (reply.Outcome == ControlOutcome.NotRunning)
         {
-            await output.WriteLineAsync("not running").ConfigureAwait(false);
+            await output.WriteLineAsync(NotRunningLine).ConfigureAwait(false);
             await output.WriteLineAsync(StopMarker.Exists(dataDirectory) ? "stop marker: set" : "stop marker: not set").ConfigureAwait(false);
             return NotRunningExitCode;
         }
 
+        if (reply.Response is not { } response)
+        {
+            await output.WriteLineAsync(NotAnsweringLine).ConfigureAwait(false);
+            await output.WriteLineAsync(
+                $"The service accepted the connection but did not answer within {(int)answerTimeout.TotalSeconds} seconds. See the service log in {SharedPaths.LogDirectory(dataDirectory)}.")
+                .ConfigureAwait(false);
+            return NotReadyExitCode;
+        }
+
+        var stateLine = response switch
+        {
+            { Ready: true } => ReadyLine,
+            { StartupError: not null } => StartupFailedLine,
+            _ => StartingLine,
+        };
         var metrics = response.Metrics;
         List<string> lines =
         [
-            "running",
+            stateLine,
             Line("Version", response.Version),
             Line("ProcessId", response.ProcessId),
             Line("Sessions", response.Sessions),
@@ -70,6 +106,7 @@ public static class StatusCommand
         if (response.StartupError is not null)
         {
             lines.Add(Line("StartupError", response.StartupError));
+            lines.Add(Line("LogDirectory", SharedPaths.LogDirectory(dataDirectory)));
         }
 
         lines.AddRange(
@@ -88,7 +125,7 @@ public static class StatusCommand
             await output.WriteLineAsync(line).ConfigureAwait(false);
         }
 
-        return RunningExitCode;
+        return response.Ready ? RunningExitCode : NotReadyExitCode;
     }
 
     private static string Line(string name, object value)

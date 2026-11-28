@@ -36,8 +36,20 @@ public static class ServiceCommand
     }
 
     /// <summary>
-    /// Exits 0 when the service was stopped on purpose or already runs; exits 1 when its pipes cannot be created
-    /// (with current-user-only access, there is no weaker fallback); otherwise runs until shutdown.
+    /// The message for a start that failed: a pipe that could not be created is named as such (it must be
+    /// current-user-only, there is no weaker fallback); any other failure is given as it is.
+    /// </summary>
+    public static string StartFailureMessage(Exception exception, bool isPipeCreationFailure)
+    {
+        return isPipeCreationFailure
+            ? $"The memory service could not start: its pipes could not be created with current-user-only access: {exception.Message}"
+            : $"The memory service could not start: {exception.Message}";
+    }
+
+    /// <summary>
+    /// Exits 0 when the service was stopped on purpose or already runs; exits 1 when the data directory cannot be
+    /// written or the service cannot start (its pipes cannot be created with current-user-only access, there is no
+    /// weaker fallback); otherwise runs until shutdown.
     /// </summary>
     public static async Task<int> RunAsync(IConfigurationRoot config, string[] args)
     {
@@ -47,13 +59,27 @@ public static class ServiceCommand
 
         if (StopMarker.Exists(dataDirectory))
         {
-            const string StoppedMessage = "The memory service was stopped on purpose; run `MemoryMcp start` to start it.";
-            logger.LogInformation(StoppedMessage);
-            Console.Out.WriteLine(StoppedMessage);
+            var stoppedMessage = $"The memory service was stopped on purpose; run {ServiceCommandLines.Start(dataDirectory)} to start it.";
+            logger.LogInformation("The memory service was stopped on purpose; it is not started");
+            Console.Out.WriteLine(stoppedMessage);
             return 0;
         }
 
-        using var instanceLock = InstanceLock.TryAcquire(dataDirectory);
+        InstanceLock? acquiredLock;
+        try
+        {
+            acquiredLock = InstanceLock.TryAcquire(dataDirectory);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            logger.LogCritical(exception, "The memory service cannot write its lock file in {DataDirectory}", dataDirectory);
+            await Console.Error.WriteLineAsync(
+                $"The memory service cannot write its lock file in the data directory {dataDirectory}: {exception.Message}")
+                .ConfigureAwait(false);
+            return 1;
+        }
+
+        using var instanceLock = acquiredLock;
         if (instanceLock is null)
         {
             logger.LogInformation("The memory service for {DataDirectory} is already running", dataDirectory);
@@ -71,9 +97,8 @@ public static class ServiceCommand
             catch (Exception exception)
             {
                 logger.LogCritical(exception, "The memory service could not start");
-                await Console.Error.WriteLineAsync(
-                    $"The memory service could not start (its pipes must be created with current-user-only access): {exception.Message}")
-                    .ConfigureAwait(false);
+                var isPipeCreationFailure = host.Services.GetRequiredService<MemoryServiceHost>().PipeCreationFailure is not null;
+                await Console.Error.WriteLineAsync(StartFailureMessage(exception, isPipeCreationFailure)).ConfigureAwait(false);
                 return 1;
             }
 

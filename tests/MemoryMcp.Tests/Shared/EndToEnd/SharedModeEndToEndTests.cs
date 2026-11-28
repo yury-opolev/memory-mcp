@@ -53,9 +53,13 @@ public sealed class SharedModeEndToEndTests : IAsyncDisposable
         var second = this.directory.StartServer();
         await second.InitializeAsync(ct);
 
-        var status = await this.directory.WaitForStatusAsync(result => result.Field("Sessions") == "2", "two sessions", ct);
+        // The sessions are served while the store still starts; status exits 0 once the store is ready too.
+        var status = await this.directory.WaitForStatusAsync(
+            result => result.Field("Sessions") == "2" && result.ExitCode == 0,
+            "two sessions on a ready service",
+            ct);
 
-        Assert.Equal(0, status.ExitCode);
+        Assert.StartsWith("running" + Environment.NewLine, status.Output, StringComparison.Ordinal);
         await this.AssertExactlyOneServiceAsync(status, relayCount: 2, ct);
         Assert.Equal(toolNames, await first.ListToolNamesAsync(ct));
         Assert.Equal(toolNames, await second.ListToolNamesAsync(ct));
@@ -210,6 +214,32 @@ public sealed class SharedModeEndToEndTests : IAsyncDisposable
         Assert.Contains("stopped on purpose", serve.Output, StringComparison.Ordinal);
         Assert.False(File.Exists(this.directory.ServiceLockPath));
         Assert.Equal(3, (await this.directory.StatusAsync(ct)).ExitCode);
+    }
+
+    [Fact]
+    public async Task Serve_LockFileNotWritable_ExitsOne_NamingTheDataDirectory()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        File.WriteAllText(this.directory.ServiceLockPath, string.Empty);
+        File.SetAttributes(this.directory.ServiceLockPath, FileAttributes.ReadOnly);
+
+        var serve = await this.directory.RunAsync(["serve"], ct);
+
+        Assert.Equal(1, serve.ExitCode);
+        Assert.Contains(this.directory.DirectoryPath, serve.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unhandled exception", serve.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UnusableDataDirectorySetting_IsNotReportedAsAnUnknownCommand()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = await this.directory.RunAsync(["--MemoryMcp:DataDirectory="], ct);
+
+        Assert.NotEqual(2, result.ExitCode);
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("ArgumentException", result.Output, StringComparison.Ordinal);
     }
 
     [Fact]

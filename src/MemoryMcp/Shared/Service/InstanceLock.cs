@@ -23,7 +23,11 @@ public sealed class InstanceLock : IDisposable
         this.path = path;
     }
 
-    /// <summary>Takes the lock, or returns null when another live service holds it.</summary>
+    /// <summary>
+    /// Takes the lock, or returns null when another live service holds it. Throws
+    /// <see cref="UnauthorizedAccessException"/> or <see cref="IOException"/> when the data directory or the lock file
+    /// cannot be created or written.
+    /// </summary>
     public static InstanceLock? TryAcquire(string dataDirectory)
     {
         Directory.CreateDirectory(dataDirectory);

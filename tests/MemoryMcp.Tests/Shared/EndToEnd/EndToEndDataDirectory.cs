@@ -124,12 +124,21 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
         return this.RunAsync(["status"], ct);
     }
 
-    /// <summary>The service's process id as <c>status</c> reports it, or null when no service answers.</summary>
+    /// <summary>
+    /// The service's process id as <c>status</c> reports it (ready, or running but not ready), or null when no service
+    /// answers.
+    /// </summary>
     public async Task<int?> GetServiceProcessIdAsync(CancellationToken ct)
     {
         var status = await this.StatusAsync(ct);
-        if (status.ExitCode != 0)
+        if (status.ExitCode is not (0 or 4))
         {
+            return null;
+        }
+
+        if (status.ExitCode == 4 && status.Field("ProcessId") is null)
+        {
+            // A service that accepted the connection but did not answer.
             return null;
         }
 
@@ -332,6 +341,11 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
         {
             try
             {
+                foreach (var file in Directory.EnumerateFiles(this.DirectoryPath, "*", SearchOption.AllDirectories))
+                {
+                    File.SetAttributes(file, FileAttributes.Normal);
+                }
+
                 Directory.Delete(this.DirectoryPath, recursive: true);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

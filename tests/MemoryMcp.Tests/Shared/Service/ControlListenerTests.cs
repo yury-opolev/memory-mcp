@@ -98,6 +98,24 @@ public sealed class ControlListenerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Stop_WhenTheMarkerCannotBeWritten_AnswersWithTheError_AndKeepsRunning()
+    {
+        // A directory where the marker file should be makes writing it fail.
+        Directory.CreateDirectory(Path.Combine(this.dataDirectory, "service.stopped"));
+        var pool = await this.StartReadyPoolAsync();
+        this.StartControlListener(pool, this.StartSessionListener());
+
+        var answer = await this.SendAsync("stop");
+
+        var response = ControlResponse.FromJson(answer!);
+        Assert.NotNull(response);
+        Assert.NotNull(response.Error);
+        Assert.Contains("stop marker could not be written", response.Error, StringComparison.Ordinal);
+        Assert.NotNull(ControlResponse.FromJson((await this.SendAsync("status"))!));
+        this.lifetime.DidNotReceive().StopApplication();
+    }
+
+    [Fact]
     public async Task UnknownCommand_ClosesWithoutAnswer_AndListenerKeepsServing()
     {
         var pool = await this.StartReadyPoolAsync();

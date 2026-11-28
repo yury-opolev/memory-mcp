@@ -92,6 +92,94 @@ public class StorePoolTests
     }
 
     [Fact]
+    public async Task StartupFailed_LeaseAfterTheRetryDelay_RetriesStartup_AndSucceeds()
+    {
+        var time = new ManualTimeProvider();
+        var logger = new ListLogger<StorePool>();
+        var factory = Substitute.For<IStoreLaneFactory>();
+        var lane = NewLane();
+        factory.CreateAsync(true, Arg.Any<CancellationToken>()).Returns(
+            Task.FromException<StoreLane>(new InvalidOperationException("the database is locked")),
+            Task.FromResult(lane));
+        await using var pool = NewPool(factory, 1, logger: logger, time: time);
+        await Assert.ThrowsAsync<ServiceNotReadyException>(() => pool.LeaseAsync("first", Token).WaitAsync(TestTimeout, Token));
+        Assert.Equal("the database is locked", pool.StartupError);
+
+        time.Advance(StorePool.StartupRetryDelay);
+        using var lease = await pool.LeaseAsync("after the delay", Token).WaitAsync(TestTimeout, Token);
+
+        Assert.Same(lane, lease.Lane);
+        Assert.True(pool.IsReady);
+        Assert.Null(pool.StartupError);
+        await factory.Received(2).CreateAsync(true, Arg.Any<CancellationToken>());
+        Assert.Single(logger.Entries, entry => entry.Level == LogLevel.Error);
+    }
+
+    [Fact]
+    public async Task StartupFailed_LeaseInsideTheRetryDelay_FailsWithoutAnAttempt()
+    {
+        var time = new ManualTimeProvider();
+        var factory = Substitute.For<IStoreLaneFactory>();
+        factory.CreateAsync(true, Arg.Any<CancellationToken>()).Returns(
+            Task.FromException<StoreLane>(new InvalidOperationException("the key store is not ready")),
+            Task.FromResult(NewLane()));
+        await using var pool = NewPool(factory, 1, time: time);
+        await Assert.ThrowsAsync<ServiceNotReadyException>(() => pool.LeaseAsync("first", Token).WaitAsync(TestTimeout, Token));
+
+        time.Advance(StorePool.StartupRetryDelay - TimeSpan.FromTicks(1));
+        var exception = await Assert.ThrowsAsync<ServiceNotReadyException>(() => pool.LeaseAsync("too early", Token).WaitAsync(TestTimeout, Token));
+
+        Assert.Contains("the key store is not ready", exception.Message);
+        await factory.Received(1).CreateAsync(true, Arg.Any<CancellationToken>());
+        Assert.False(pool.IsReady);
+    }
+
+    [Fact]
+    public async Task StartupFailed_TwoLeasesAfterTheDelay_TriggerOneAttempt_AndBothSucceed()
+    {
+        var time = new ManualTimeProvider();
+        var retry = new TaskCompletionSource<StoreLane>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var factory = Substitute.For<IStoreLaneFactory>();
+        factory.CreateAsync(true, Arg.Any<CancellationToken>()).Returns(
+            Task.FromException<StoreLane>(new InvalidOperationException("busy")),
+            retry.Task);
+        await using var pool = NewPool(factory, 1, time: time);
+        await Assert.ThrowsAsync<ServiceNotReadyException>(() => pool.LeaseAsync("first", Token).WaitAsync(TestTimeout, Token));
+        time.Advance(StorePool.StartupRetryDelay);
+
+        var firstLease = pool.LeaseAsync("a", Token);
+        var secondLease = pool.LeaseAsync("b", Token);
+        Assert.False(firstLease.IsCompleted);
+        Assert.False(secondLease.IsCompleted);
+        retry.SetResult(NewLane());
+
+        var first = await firstLease.WaitAsync(TestTimeout, Token);
+        first.Dispose();
+        using var second = await secondLease.WaitAsync(TestTimeout, Token);
+        await factory.Received(2).CreateAsync(true, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task StartupRetryFails_TheWaitingCallGetsTheLatestError_AndItIsLoggedOnce()
+    {
+        var time = new ManualTimeProvider();
+        var logger = new ListLogger<StorePool>();
+        var factory = Substitute.For<IStoreLaneFactory>();
+        factory.CreateAsync(true, Arg.Any<CancellationToken>()).Returns(
+            Task.FromException<StoreLane>(new InvalidOperationException("first failure")),
+            Task.FromException<StoreLane>(new InvalidOperationException("second failure")));
+        await using var pool = NewPool(factory, 1, logger: logger, time: time);
+        await Assert.ThrowsAsync<ServiceNotReadyException>(() => pool.LeaseAsync("first", Token).WaitAsync(TestTimeout, Token));
+        time.Advance(StorePool.StartupRetryDelay);
+
+        var exception = await Assert.ThrowsAsync<ServiceNotReadyException>(() => pool.LeaseAsync("retry", Token).WaitAsync(TestTimeout, Token));
+
+        Assert.Contains("second failure", exception.Message);
+        Assert.Equal("second failure", pool.StartupError);
+        Assert.Equal(2, logger.Entries.Count(entry => entry.Level == LogLevel.Error));
+    }
+
+    [Fact]
     public async Task LeaseAsync_CancelledWhileWaiting_LeavesQueueDepthAtZero()
     {
         var metrics = new CallMetrics();

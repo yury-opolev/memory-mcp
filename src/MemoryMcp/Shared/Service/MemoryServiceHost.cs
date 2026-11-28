@@ -47,6 +47,9 @@ public sealed class MemoryServiceHost : IHostedService
     /// <summary>The failure of a listener after start, which ended the service; null otherwise.</summary>
     public Exception? ListenerFailure { get; private set; }
 
+    /// <summary>Why <see cref="StartAsync"/> failed when a listener could not create its pipe; null otherwise.</summary>
+    public Exception? PipeCreationFailure { get; private set; }
+
     /// <summary>
     /// Registers the pooled memory services, the MCP tools (without a transport: sessions are created per
     /// connection), both listeners and this host.
@@ -94,6 +97,7 @@ public sealed class MemoryServiceHost : IHostedService
         if (sessions.IsFaulted || control.IsFaulted)
         {
             var failure = (sessions.IsFaulted ? sessions.Exception : control.Exception)!.GetBaseException();
+            this.PipeCreationFailure = failure;
             await this.stopping.CancelAsync().ConfigureAwait(false);
             await Task.WhenAll(sessions, control).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
             ExceptionDispatchInfo.Throw(failure);

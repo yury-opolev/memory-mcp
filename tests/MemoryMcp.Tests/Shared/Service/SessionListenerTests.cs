@@ -282,6 +282,38 @@ public sealed class SessionListenerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Listener_ClientOfAnotherAccountRefused_KeepsAccepting()
+    {
+        var waits = 0;
+        var listener = new SessionListener(
+            this.pipeName,
+            this.FakeServices(),
+            NullLoggerFactory.Instance,
+            SessionListener.CreateServerPipe,
+            async (pipe, ct) =>
+            {
+                if (Interlocked.Increment(ref waits) == 1)
+                {
+                    // As on Unix, where the peer's account is checked after a client connected.
+                    await pipe.WaitForConnectionAsync(ct);
+                    throw new UnauthorizedAccessException("Client connection (user id 1001) was refused because it was not owned by the current user.");
+                }
+
+                await pipe.WaitForConnectionAsync(ct);
+            });
+        this.Start(listener);
+        await using (var refused = await McpPipeClient.ConnectPipeAsync(this.pipeName, Token))
+        {
+            await Eventually.WaitUntilAsync(() => Volatile.Read(ref waits) >= 2, Token);
+        }
+
+        var client = await this.ConnectAsync(this.pipeName);
+        var tools = await client.Client.ListToolsAsync(cancellationToken: Token);
+
+        Assert.Equal(5, tools.Count);
+    }
+
+    [Fact]
     public async Task Session_ClientLeavesMidHandshake_ListenerKeepsServing()
     {
         var listener = this.NewListener(this.FakeServices());
