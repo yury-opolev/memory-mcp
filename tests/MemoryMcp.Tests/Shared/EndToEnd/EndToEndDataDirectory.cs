@@ -266,11 +266,23 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Ends everything the test started. Every step runs even when an earlier one fails, so a relay that does not
+    /// dispose cleanly cannot leave the service or other processes running; the first failure is rethrown at the end.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        var failures = new List<Exception>();
         foreach (var server in this.servers)
         {
-            await server.DisposeAsync();
+            try
+            {
+                await server.DisposeAsync();
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
         }
 
         try
@@ -281,29 +293,41 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
                 await KillAsync(processId);
             }
         }
-        catch (Exception exception) when (exception is TimeoutException or InvalidOperationException or FormatException)
+        catch (Exception exception)
         {
             // The sweep below still ends whatever runs.
+            failures.Add(exception);
         }
 
         // A service that was still starting when stop ran, or a second serve that had not exited yet.
-        foreach (var process in this.FindStartedProcesses())
+        try
         {
-            using (process)
+            foreach (var process in this.FindStartedProcesses())
             {
-                try
+                using (process)
                 {
-                    process.Kill(entireProcessTree: false);
-                    await process.WaitForExitAsync(CancellationToken.None);
-                }
-                catch (InvalidOperationException)
-                {
-                    // It exited in the meantime.
+                    try
+                    {
+                        process.Kill(entireProcessTree: false);
+                        await process.WaitForExitAsync(CancellationToken.None);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // It exited in the meantime.
+                    }
                 }
             }
         }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
 
         await this.DeleteDirectoryAsync();
+        if (failures.Count > 0)
+        {
+            throw new AggregateException("Cleaning up the end-to-end data directory failed.", failures);
+        }
     }
 
     private static async Task KillAsync(int processId)
