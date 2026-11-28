@@ -1,0 +1,386 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json.Nodes;
+using MemoryMcp.Shared;
+
+namespace MemoryMcp.Tests.Shared.EndToEnd;
+
+/// <summary>
+/// A fresh temp data directory for one test, with its settings.json, the server processes started for it and the
+/// commands run against it. Disposing it stops everything the test caused to start, even after a failure: the relays,
+/// then the service (<c>stop</c>, then a kill by the process id <c>status</c> reports), then any process of the test
+/// executable that was not running when the directory was made, and deletes the directory.
+/// </summary>
+internal sealed class EndToEndDataDirectory : IAsyncDisposable
+{
+    /// <summary>The bound of every wait for a condition.</summary>
+    public static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(60);
+
+    private static readonly TimeSpan commandTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan pollInterval = TimeSpan.FromMilliseconds(100);
+
+    private readonly List<ServerProcess> servers = [];
+
+    /// <summary>
+    /// The processes of the test executable that were running when the directory was made. A process is told apart
+    /// by its id, not its start time: on Linux <see cref="Process.StartTime"/> is derived from the boot time in whole
+    /// seconds, so a process started just after the directory was made can report a start time before it.
+    /// </summary>
+    private readonly HashSet<int> preexistingProcessIds;
+
+    private EndToEndDataDirectory(string directoryPath)
+    {
+        this.DirectoryPath = directoryPath;
+        this.preexistingProcessIds = [.. RunningTestExecutableProcessIds()];
+    }
+
+    public string DirectoryPath { get; }
+
+    public string SettingsPath => Path.Combine(this.DirectoryPath, "settings.json");
+
+    public string ServiceLockPath => SharedPaths.ServiceLock(this.DirectoryPath);
+
+    public string StopMarkerPath => SharedPaths.StopMarker(this.DirectoryPath);
+
+    public static EndToEndDataDirectory Create(bool isSharedModeEnabled)
+    {
+        var directoryPath = Path.Combine(Path.GetTempPath(), "memory-mcp-e2e-" + Guid.NewGuid().ToString("N")[..12]);
+        Directory.CreateDirectory(directoryPath);
+        var directory = new EndToEndDataDirectory(directoryPath);
+        directory.WriteSettings(isSharedModeEnabled);
+        return directory;
+    }
+
+    public static bool IsAlive(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Writes settings.json: shared mode on or off, encryption off and an embedder endpoint nothing listens on. The
+    /// detached service sees no <c>MemoryMcp__*</c> variable, so this file is how it is configured.
+    /// </summary>
+    public void WriteSettings(bool isSharedModeEnabled)
+    {
+        var settings = new JsonObject
+        {
+            ["MemoryMcp"] = new JsonObject
+            {
+                ["Shared"] = new JsonObject { ["Enabled"] = isSharedModeEnabled },
+                ["Encryption"] = new JsonObject { ["Enabled"] = false },
+                ["Ollama"] = new JsonObject { ["Endpoint"] = "http://127.0.0.1:9" },
+            },
+        };
+        File.WriteAllText(this.SettingsPath, settings.ToJsonString());
+    }
+
+    /// <summary>Starts the executable with no arguments for this directory; it is stopped when the directory is disposed.</summary>
+    public ServerProcess StartServer()
+    {
+        var server = ServerProcess.Start(this.DirectoryPath);
+        this.servers.Add(server);
+        return server;
+    }
+
+    /// <summary>Runs <c>MemoryMcp &lt;arguments&gt;</c> for this directory to its end.</summary>
+    public async Task<CommandResult> RunAsync(IReadOnlyList<string> arguments, CancellationToken ct)
+    {
+        var startInfo = ServerProcess.CreateStartInfo(this.DirectoryPath, arguments);
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"{ServerProcess.ExecutablePath} did not start.");
+        process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEndAsync(ct);
+        var error = process.StandardError.ReadToEndAsync(ct);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(commandTimeout);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: false);
+            await process.WaitForExitAsync(CancellationToken.None);
+            throw new TimeoutException($"MemoryMcp {string.Join(' ', arguments)} did not exit within {commandTimeout.TotalSeconds} seconds.");
+        }
+
+        return new CommandResult(process.ExitCode, await output + await error);
+    }
+
+    public Task<CommandResult> StatusAsync(CancellationToken ct)
+    {
+        return this.RunAsync(["status"], ct);
+    }
+
+    /// <summary>
+    /// The service's process id as <c>status</c> reports it (ready, or running but not ready), or null when no service
+    /// answers.
+    /// </summary>
+    public async Task<int?> GetServiceProcessIdAsync(CancellationToken ct)
+    {
+        var status = await this.StatusAsync(ct);
+        if (status.ExitCode is not (0 or 4))
+        {
+            return null;
+        }
+
+        if (status.ExitCode == 4 && status.Field("ProcessId") is null)
+        {
+            // A service that accepted the connection but did not answer.
+            return null;
+        }
+
+        return int.Parse(status.Field("ProcessId") ?? throw new InvalidOperationException($"status printed no ProcessId:\n{status.Output}"), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Runs <c>status</c> until <paramref name="condition"/> holds for its result, and returns that result.</summary>
+    public async Task<CommandResult> WaitForStatusAsync(Func<CommandResult, bool> condition, string description, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + WaitTimeout;
+        while (true)
+        {
+            var status = await this.StatusAsync(ct);
+            if (condition(status))
+            {
+                return status;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException($"Waited {WaitTimeout.TotalSeconds} seconds for {description}; the last status was:\n{status.Output}");
+            }
+
+            await Task.Delay(pollInterval, ct);
+        }
+    }
+
+    /// <summary>Kills the service process that <c>status</c> reports and waits for it to exit; returns its process id.</summary>
+    public async Task<int> KillServiceAsync(CancellationToken ct)
+    {
+        var processId = await this.GetServiceProcessIdAsync(ct) ?? throw new InvalidOperationException("No memory service is running to kill.");
+        await KillAsync(processId);
+        return processId;
+    }
+
+    /// <summary>
+    /// The processes of the test executable that were not running when this directory was made: this test's relays,
+    /// commands and services. The tests run one at a time, so no other test's processes are among them.
+    /// </summary>
+    public List<Process> FindStartedProcesses()
+    {
+        var started = new List<Process>();
+        foreach (var process in RunningTestExecutableProcesses())
+        {
+            if (this.preexistingProcessIds.Contains(process.Id))
+            {
+                process.Dispose();
+            }
+            else
+            {
+                started.Add(process);
+            }
+        }
+
+        return started;
+    }
+
+    /// <summary>The running processes of the test executable (<see cref="ServerProcess.ExecutablePath"/>).</summary>
+    private static List<Process> RunningTestExecutableProcesses()
+    {
+        var running = new List<Process>();
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ServerProcess.ExecutablePath)))
+        {
+            var isTestExecutable = false;
+            try
+            {
+                isTestExecutable = !process.HasExited
+                    && string.Equals(process.MainModule?.FileName, ServerProcess.ExecutablePath, comparison);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or NotSupportedException)
+            {
+                // It exited while being looked at, or belongs to someone else.
+            }
+
+            if (isTestExecutable)
+            {
+                running.Add(process);
+            }
+            else
+            {
+                process.Dispose();
+            }
+        }
+
+        return running;
+    }
+
+    private static List<int> RunningTestExecutableProcessIds()
+    {
+        var processes = RunningTestExecutableProcesses();
+        var processIds = processes.Select(process => process.Id).ToList();
+        foreach (var process in processes)
+        {
+            process.Dispose();
+        }
+
+        return processIds;
+    }
+
+    /// <summary>Waits until exactly <paramref name="count"/> processes of the test executable started by this test run.</summary>
+    public async Task WaitForStartedProcessCountAsync(int count, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + WaitTimeout;
+        while (true)
+        {
+            var started = this.FindStartedProcesses();
+            var startedCount = started.Count;
+            foreach (var process in started)
+            {
+                process.Dispose();
+            }
+
+            if (startedCount == count)
+            {
+                return;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException($"Waited {WaitTimeout.TotalSeconds} seconds for {count} MemoryMcp processes; {startedCount} run.");
+            }
+
+            await Task.Delay(pollInterval, ct);
+        }
+    }
+
+    /// <summary>
+    /// Ends everything the test started. Every step runs even when an earlier one fails, so a relay that does not
+    /// dispose cleanly cannot leave the service or other processes running; the first failure is rethrown at the end.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        var failures = new List<Exception>();
+        foreach (var server in this.servers)
+        {
+            try
+            {
+                await server.DisposeAsync();
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        try
+        {
+            await this.RunAsync(["stop"], CancellationToken.None);
+            if (await this.GetServiceProcessIdAsync(CancellationToken.None) is { } processId)
+            {
+                await KillAsync(processId);
+            }
+        }
+        catch (Exception exception)
+        {
+            // The sweep below still ends whatever runs.
+            failures.Add(exception);
+        }
+
+        // A service that was still starting when stop ran, or a second serve that had not exited yet.
+        try
+        {
+            foreach (var process in this.FindStartedProcesses())
+            {
+                using (process)
+                {
+                    try
+                    {
+                        process.Kill(entireProcessTree: false);
+                        await process.WaitForExitAsync(CancellationToken.None);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // It exited in the meantime.
+                    }
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
+
+        await this.DeleteDirectoryAsync();
+        if (failures.Count > 0)
+        {
+            throw new AggregateException("Cleaning up the end-to-end data directory failed.", failures);
+        }
+    }
+
+    private static async Task KillAsync(int processId)
+    {
+        Process process;
+        try
+        {
+            process = Process.GetProcessById(processId);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+
+        using (process)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: false);
+            }
+            catch (InvalidOperationException)
+            {
+                return;
+            }
+
+            await process.WaitForExitAsync(CancellationToken.None);
+        }
+    }
+
+    /// <summary>Deletes the directory, trying again while a file of an exited process is still being released.</summary>
+    private async Task DeleteDirectoryAsync()
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        while (Directory.Exists(this.DirectoryPath))
+        {
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(this.DirectoryPath, "*", SearchOption.AllDirectories))
+                {
+                    File.SetAttributes(file, FileAttributes.Normal);
+                }
+
+                Directory.Delete(this.DirectoryPath, recursive: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (DateTime.UtcNow > deadline)
+                {
+                    return;
+                }
+
+                await Task.Delay(pollInterval);
+            }
+        }
+    }
+}

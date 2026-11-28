@@ -82,6 +82,7 @@ After the script finishes, just copy the config snippet into your MCP client and
 | `--rebuild` / `-Rebuild` | Force a fresh build even if binaries already exist |
 | `--skip-ollama` / `-SkipOllama` | Skip Ollama checks and model pull |
 | `--data-encryption true` / `-DataEncryption $true` | Enable AES-256-GCM encryption at rest |
+| `--shared true\|false` / `-Shared $true\|$false` | Switch [shared mode](#shared-mode-one-process-for-all-sessions) on or off; when omitted it is left as it is |
 
 ### MCP Client Configuration
 
@@ -167,6 +168,82 @@ dotnet run --project src/MemoryMcp
 ### Startup Health Check
 
 On startup, the server checks whether Ollama is reachable and whether the configured embedding model is available. If either check fails, the server logs a warning but **does not crash** — it starts normally so that non-embedding tools (`get_memory`, `delete_memory`) remain available. Embedding-dependent tools (`ingest_memory`, `update_memory`, `search_memory`) return a clear error message if Ollama is unavailable at call time.
+
+## Shared mode: one process for all sessions
+
+By default every agent session starts its own `MemoryMcp` process, and each one opens the database, loads the store and checks the embedder. In **shared mode** one long-lived memory service owns the database instead, and each session's `MemoryMcp` process is a thin relay that forwards the session's MCP traffic to it. Startup work happens once, tool calls from all sessions go through one place (queued, and measured), and the service can be upgraded or stopped for maintenance without closing any session.
+
+Client configurations do not change: clients keep starting `bin/MemoryMcp` with `MemoryMcp__DataDirectory`, and that process becomes a relay when `MemoryMcp:Shared:Enabled` is `true` in the data directory's `settings.json`.
+
+**Switch it on:**
+
+```sh
+./scripts/install.sh --shared true          # Linux / macOS
+```
+
+```powershell
+.\scripts\install.ps1 -Shared $true         # Windows
+```
+
+This publishes the service to `<install root>/service/<yyyyMMdd-HHmmss>/`, writes that path to `<data>/service-path.txt`, registers a launcher that starts `serve` for the data directory at logon and on demand, (re)starts the service on the new version, waits (up to 120 seconds) until `status` reports it ready, and then sets `MemoryMcp.Shared.Enabled` in `settings.json` (other keys, such as the encryption setting, are kept). If the service runs but its store failed to start, the script prints the startup error and the log directory and stops there. Sessions started from then on are relays; sessions that were already open keep running standalone until they are restarted. On Windows, shared mode needs PowerShell 7 (`pwsh`); the script says so and changes nothing when run with Windows PowerShell 5.1. An invalid `settings.json` stops the script before anything is changed.
+
+**Switching shared mode on for the first time needs all agent sessions closed**, so that `bin/` can be replaced: a `bin/` built before shared mode cannot act as a relay. If sessions still run from it, the script installs and starts the service anyway, but leaves shared mode switched off in `settings.json` and ends with a warning that shared mode is not in effect yet, with the command to run again once all sessions are closed. Later upgrades do not need sessions closed.
+
+| OS | Launcher registered by the install script | Without it |
+|----|-------------------------------------------|------------|
+| Windows | Scheduled task `MemoryMcp-<hash>`: at logon of the current user, only while logged on, no elevation, no console window (the service copy is built as a GUI-subsystem program) | Detached process |
+| Linux | systemd user unit `~/.config/systemd/user/memory-mcp-<hash>.service` (`Restart=on-failure`, `WantedBy=default.target`), when `systemctl --user` works | Detached process in its own session (`setsid`); not started at login |
+| macOS | LaunchAgent `~/Library/LaunchAgents/io.github.memory-mcp.<hash>.plist` (`RunAtLoad`) | Detached process in its own session |
+
+`<hash>` is derived from the data directory's full path (`MemoryMcp status --print-hash` prints it), so each data directory has its own service, pipe and launcher. A relay that finds no service running starts it through the registered launcher.
+
+**Upgrades.** While shared mode is on, every install (with or without `--shared`) updates the service: it publishes a new service directory, re-registers the launcher on it, stops the old service, and starts the new one. Open sessions stay open: their relays reconnect and replay the MCP handshake, and a call that was in flight during the restart gets an error saying the call may or may not have completed (check before repeating a write; a response the service sent before it went is still delivered). If the old service was asked to stop but has not exited in time, the script says so and prints the exact `start` command for the new service copy; open sessions report the service as stopped until it is started. `bin/` is what client configurations point at; it is refreshed only when no open session runs from it, otherwise the script prints `bin is in use by open sessions and was left as is; the service was updated`. When the `bin/` left in place holds a different build than the one just installed (its `MemoryMcp.dll` differs), the script ends with a warning: sessions started now still run the previous build (standalone, if it predates shared mode) until the install is run again with all agent sessions closed. Service directories other than the newest two are deleted.
+
+**Switch it off:**
+
+```sh
+./scripts/install.sh --shared false
+```
+
+```powershell
+.\scripts\install.ps1 -Shared $false
+```
+
+This sets `MemoryMcp.Shared.Enabled` to `false`, stops the service, removes the launcher and `service-path.txt`. It is the one change that needs agent sessions restarted: open sessions keep reporting that shared mode was switched off until they are.
+
+**Commands.** Pass the data directory the install script uses (`<install root>/data`), since the program's own default is the install root itself:
+
+```sh
+MemoryMcp status --MemoryMcp:DataDirectory="<data>"   # state, version, sessions, call and queue measurements (exit codes below)
+MemoryMcp stop   --MemoryMcp:DataDirectory="<data>"   # stop gracefully and keep it down: relays and the logon launcher do not restart it
+MemoryMcp start  --MemoryMcp:DataDirectory="<data>"   # clear the stop and start it through the launcher
+```
+
+Always give the data directory: a bare `MemoryMcp start` acts on the program's default data directory, which is not the one the install scripts use. Messages that tell you to run `start` print the full command for the data directory in use, for example ``MemoryMcp start --MemoryMcp:DataDirectory="C:\Users\me\AppData\Local\memory-mcp\data"``.
+
+| `status` exit code | First line | Meaning |
+|---|---|---|
+| 0 | `running` | The service runs and its store is ready |
+| 3 | `not running` | No service runs (the next line says whether the stop marker is set) |
+| 4 | `running, still starting` | The service runs and its store is still starting |
+| 4 | `running, startup failed` | The service runs but its store failed to start; `StartupError` and `LogDirectory` follow. The service retries the startup on the next call that arrives at least 5 seconds after the failure |
+| 4 | `running, not answering` | A service accepted the connection but did not answer in time |
+
+`stop` exits 0 when the service stopped (or none was running; the stop is then recorded), and 1 when the service did not answer, or was asked to stop and has not exited within 30 seconds; the message says which.
+
+While the service is stopped on purpose, tool calls in open sessions fail with a message that says so and gives the full `start` command, and the sessions reconnect on their own after `start` (or the next install, which clears the stop). This is how to do maintenance on the database without closing sessions. The service logs to `<data>/logs/`.
+
+**Parallel calls.** `MemoryMcp:Shared:MaxParallelCalls` (default `1`) is how many tool calls run at once. With `1` calls are queued in arrival order on one store. With N > 1 the service opens N independent store connections; SQLite still allows one writer at a time, and a call that meets a busy database fails with a retryable error. Values above 1 help only once the embedder serves more than one request at a time; `status` shows the wait and run times to measure it.
+
+**Settings.** In shared mode the service reads its settings from `appsettings.json`, the data directory's `settings.json` and its own environment. Of a client's `MemoryMcp__*` environment variables only `MemoryMcp__DataDirectory` and `MemoryMcp__Shared__*` have an effect; a relay names any other one on stderr as ignored. Put such settings in `settings.json`.
+
+**Security model.** Relays and the service talk over a .NET named pipe created with the current-user-only restriction: on Windows a named pipe whose ACL admits only the user, on Linux and macOS a Unix domain socket with the same restriction. The operating system vouches for the caller, so there is no token or secret anywhere, and nothing listens on TCP. If the pipe cannot be created with that restriction, the service refuses to start. Other OS users and other machines are excluded; processes running as the same user are trusted, as they are without shared mode (they can read the data directory and the key store). The service runs as the logged-in user, never as a system account, and nothing needs admin rights.
+
+**Elevation (Windows).** A session and the service must run at the same elevation. The current-user-only check compares the owner of the process token, which is the Administrators group for an elevated process, so a session started as administrator cannot connect to a service started without elevation (the scheduled task starts it without), or the other way round. Such a session gets, at once: "The memory service is running, but this session is not allowed to connect to it. This happens when the session runs elevated (as administrator) and the service does not, or the other way round. Start the session at the same elevation as the service." It does not start a second service.
+
+**Launchers.** A launcher call (`schtasks`, `systemctl --user`, `launchctl`) that fails, refuses or takes longer than 10 seconds is skipped and the next launcher is tried, ending with the detached process; at most one start request succeeds per connection attempt, and none is made while the service is stopped on purpose or shared mode is off.
+
+**Platform status.** Windows and Linux (systemd user unit and the detached fallback) are verified. macOS is implemented (launchd agent, detached fallback) but not yet verified on a Mac.
 
 ## MCP Tools
 
@@ -325,7 +402,11 @@ By default, data is stored in the platform-specific local application data direc
 | Linux | `~/.local/share/memory-mcp` |
 | macOS | `~/.local/share/memory-mcp` |
 
-You can override this with the `DataDirectory` setting or the `MemoryMcp__DataDirectory` environment variable.
+You can override this with the `DataDirectory` setting or the `MemoryMcp__DataDirectory` environment variable. The install scripts use `<install root>/data` and put it in the client configuration they print.
+
+Settings on the command line must use the `--key=value` form (for example `--MemoryMcp:DataDirectory=<dir>`). A first argument of the form `key=value` or `/key=value` is no longer accepted as a setting: the first argument is either a command (`serve`, `start`, `stop`, `status`) or begins with `--`, and anything else is reported as an unknown command.
+
+Settings that must survive a rebuild go in the data directory's `settings.json`, which is read last and wins over `appsettings.json`, environment variables and the command line. The install scripts write `Encryption.Enabled` and `Shared.Enabled` there and keep every other key.
 
 ```json
 {
@@ -359,6 +440,10 @@ You can override this with the `DataDirectory` setting or the `MemoryMcp__DataDi
 | `Ollama.Endpoint` | `http://localhost:11434` | Ollama API URL |
 | `Ollama.Model` | `qwen3-embedding:0.6b` | Embedding model name (must be pulled in Ollama) |
 | `Ollama.Dimensions` | `1024` | Vector dimensions (must match model output) |
+| `Shared.Enabled` | `false` | Run as a relay to the shared memory service (set by `--shared` / `-Shared`; see [Shared mode](#shared-mode-one-process-for-all-sessions)) |
+| `Shared.MaxParallelCalls` | `1` | Tool calls the shared service runs at once; values below 1 count as 1 |
+
+In shared mode the service ignores a client's `MemoryMcp__*` environment variables other than `MemoryMcp__DataDirectory` and `MemoryMcp__Shared__*`; put other settings in `settings.json`.
 
 ### Using a Different Embedding Model
 
@@ -412,7 +497,10 @@ memory-mcp/
   MemoryMcp.slnx                     Solution file
 
   scripts/
-    install.sh / install.ps1         One-step install (build, publish, configure)
+    install.sh / install.ps1         One-step install (build, publish, configure, shared mode)
+    shared/                          Launcher templates install.sh renders in shared mode
+      memory-mcp.service.template    systemd user unit (Linux)
+      io.github.memory-mcp.plist.template  launchd agent (macOS)
     setup.sh / setup.ps1             Setup scripts (restore, build, pull model)
     run.sh / run.ps1                 Publish + start server (--rebuild to force)
     update-sqlite-vec.ps1            Vendor + verify sqlite-vec release binaries
@@ -445,7 +533,13 @@ memory-mcp/
       runtimes/                      Vendored sqlite-vec binaries per RID
 
     MemoryMcp/                       MCP host (executable)
-      Program.cs                     Entry point, DI, stdio transport
+      Program.cs                     Entry point: picks standalone, relay, serve, start, stop or status
+      Hosting/                       Configuration, role selection, standalone server, file log
+      Shared/                        Shared mode
+        PipeNames.cs, SharedPaths.cs Pipe and launcher names, files in the data directory
+        Relay/                       The stdio relay to the service (reconnect, handshake replay)
+        Service/                     serve, start, stop, status; session and control pipes, store pool
+        Launch/                      Per-OS launchers (scheduled task, systemd, launchd, detached)
       Storage/
         SqlCipherDatabaseConverter.cs  One-time conversion of a SQLCipher database
       Tools/

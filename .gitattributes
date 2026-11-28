@@ -8,6 +8,8 @@
 *.bash       text eol=lf
 Dockerfile   text eol=lf
 *.dockerfile text eol=lf
+# The systemd unit and launchd plist templates scripts/install.sh renders on Linux and macOS.
+scripts/shared/*.template text eol=lf
 
 # Vendored sqlite-vec native libraries (scripts/update-sqlite-vec.ps1): never touch line endings.
 *.dll   binary

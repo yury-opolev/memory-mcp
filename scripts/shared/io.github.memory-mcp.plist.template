@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The memory-mcp shared memory service for one data directory, written by scripts/install.sh in shared mode as
+     ~/Library/LaunchAgents/io.github.memory-mcp.<hash>.plist. The install script fills in the @...@ values, escaped
+     for XML. Do not edit the installed copy: the next install rewrites it. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@SERVICE_EXE@</string>
+        <string>serve</string>
+        <string>--MemoryMcp:DataDirectory=@DATA_DIR@</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DOTNET_ROOT</key>
+        <string>@DOTNET_ROOT@</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@HOME@</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

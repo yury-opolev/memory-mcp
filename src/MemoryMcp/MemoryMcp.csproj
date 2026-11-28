@@ -5,6 +5,14 @@
     <RootNamespace>MemoryMcp</RootNamespace>
   </PropertyGroup>
 
+  <!-- scripts/install.ps1 publishes the shared-mode service copy with -p:MemoryMcpWindowlessService=true. A Windows
+       GUI-subsystem apphost gets no console, so the scheduled task that starts the service at logon or on demand
+       shows no window, not even briefly. The service writes only to its log file; bin/, which clients run, stays a
+       console application. -->
+  <PropertyGroup Condition="'$(MemoryMcpWindowlessService)' == 'true'">
+    <OutputType>WinExe</OutputType>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\MemoryMcp.Core\MemoryMcp.Core.csproj" />
   </ItemGroup>
