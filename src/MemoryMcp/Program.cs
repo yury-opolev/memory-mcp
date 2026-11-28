@@ -1,5 +1,6 @@
 using MemoryMcp.Hosting;
 using MemoryMcp.Shared;
+using MemoryMcp.Shared.Relay;
 using MemoryMcp.Shared.Service;
 using Microsoft.Extensions.Configuration;
 
@@ -17,15 +18,13 @@ catch (ArgumentException exception)
     return 2;
 }
 
-if (role == ServerRole.Standalone)
+return role switch
 {
-    return await StandaloneServer.RunAsync(args);
-}
-
-if (role == ServerRole.Service)
-{
-    return await ServiceCommand.RunAsync(configuration, args);
-}
-
-Console.Error.WriteLine($"Role '{role}' is not implemented yet.");
-return 2;
+    ServerRole.Standalone => await StandaloneServer.RunAsync(args),
+    ServerRole.Relay => await RelayCommand.RunAsync(configuration, args),
+    ServerRole.Service => await ServiceCommand.RunAsync(configuration, args),
+    ServerRole.Start => await StartCommand.RunAsync(configuration),
+    ServerRole.Stop => await StopCommand.RunAsync(configuration),
+    ServerRole.Status => await StatusCommand.RunAsync(configuration),
+    _ => throw new InvalidOperationException($"Role '{role}' has no command."),
+};
