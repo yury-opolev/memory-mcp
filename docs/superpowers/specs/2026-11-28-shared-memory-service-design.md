@@ -149,6 +149,22 @@ to agree on.
   sessions must not run concurrently against the store. The first version puts one gate around tool
   execution in the server project. A finer gate that lets embedding calls overlap would need Core
   changes and is out of scope. **(designer)**
+- **Parallelism is a setting, default 1. (owner)** `MemoryMcp:Shared:MaxParallelCalls` says how many
+  tool calls may run at once. With 1 the service has one store and one gate, as above. With N > 1 the
+  service holds N independent store instances, each with its own connection, and a call takes a free
+  one; no store instance ever runs two calls at once. This needs no Core change: it is what several
+  standalone processes on one database do today, including the possibility of an occasional
+  "database busy" from SQLite, which the service must surface as a clear, retryable tool error instead
+  of crashing a session. Startup work that must happen once per database (conversion, rebuilds,
+  backfill) runs on the first instance before the others open. Values above 1 are not expected to help
+  until the embedder serves more than one request at a time (Ollama loads the model with one parallel
+  slot today, and SQLite allows one writer regardless), so 1 is the supported default and higher values
+  are for measuring.
+- **Queue wait is measured. (owner)** For every tool call the service records how long it waited for a
+  free store and how long it ran. `status` reports, since the service started: the number of calls, and
+  the average, 95th percentile and maximum of both the wait and the run time, plus the current queue
+  depth. A call that waited longer than a threshold (builder's choice, around one second) is also
+  written to the log with the tool name. No query text or memory content goes into these records.
 - Runs as the logged-in user, never as a system account: the database key lives in DPAPI (Windows),
   the Keychain (macOS) or libsecret (Linux), all bound to the user's session.
 - Writes a rolling log file under the data directory; it has no console.
@@ -205,8 +221,9 @@ One abstraction with a per-OS implementation **(designer)**:
 ## Verification
 
 - Unit tests for the relay's handshake replay and in-flight error handling, for single-instance
-  behaviour, for the call gate (two sessions calling at once never overlap in the store), and for
-  launcher selection per OS.
+  behaviour, for the call gate (two sessions calling at once never overlap in the same store instance;
+  with `MaxParallelCalls` = 2 two calls do overlap and a third waits), for the wait and run-time
+  measurements, and for launcher selection per OS.
 - Integration tests over a real pipe between a service and relays inside the test run.
 - End to end on Windows on the owner's machine: enable shared mode, all four client types work with
   their existing configs, exactly one process holds `memory.db`, another OS account cannot connect,
