@@ -1,3 +1,4 @@
+using System.Collections;
 using MemoryMcp.Shared;
 using MemoryMcp.Shared.Launch;
 using Xunit;
@@ -58,6 +59,29 @@ public sealed class DetachedProcessLauncherTests : IDisposable
         Assert.True(process.IsDetached);
         Assert.Equal("/usr/bin/setsid", process.FileName);
         Assert.Equal([this.executable, "serve", "--MemoryMcp:DataDirectory=" + this.dataDirectory], process.Arguments);
+    }
+
+    [Fact]
+    public async Task Start_RemovesEveryMemoryMcpSettingFromTheServiceEnvironment()
+    {
+        var environment = new Hashtable
+        {
+            ["MemoryMcp__Ollama__Endpoint"] = "http://localhost:11434",
+            ["MEMORYMCP__ENCRYPTION__ENABLED"] = "false",
+            ["MemoryMcp__DataDirectory"] = this.dataDirectory,
+            ["MemoryMcp__Shared__Enabled"] = "true",
+            ["PATH"] = "/usr/bin",
+            ["MemoryMcpOther"] = "unrelated",
+        };
+        var launcher = new DetachedProcessLauncher(this.dataDirectory, this.runner, setsidPath: null, () => environment);
+
+        await launcher.StartAsync(TestContext.Current.CancellationToken);
+
+        var process = Assert.Single(this.runner.Processes);
+        Assert.Equal(
+            ["MEMORYMCP__ENCRYPTION__ENABLED", "MemoryMcp__DataDirectory", "MemoryMcp__Ollama__Endpoint", "MemoryMcp__Shared__Enabled"],
+            process.RemovedVariables.Order(StringComparer.Ordinal));
+        Assert.Equal(["serve", "--MemoryMcp:DataDirectory=" + this.dataDirectory], process.Arguments);
     }
 
     [Fact]
