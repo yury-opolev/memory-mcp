@@ -64,7 +64,8 @@ public class MemoryMcpOptions
 
     /// <summary>
     /// Encryption configuration. When enabled, content files are encrypted with AES-256-GCM
-    /// and the SQLite database is encrypted with SQLCipher. The encryption key is managed
+    /// and the SQLite database is encrypted by the linked engine (SQLCipher, or SQLite3 Multiple Ciphers
+    /// in the standalone server). The encryption key is managed
     /// by the OS-native secret store (DPAPI on Windows, Keychain on macOS, libsecret on Linux).
     /// </summary>
     public EncryptionOptions Encryption { get; set; } = new();
@@ -97,7 +98,7 @@ public class EncryptionOptions
 {
     /// <summary>
     /// When true, content files are encrypted with AES-256-GCM and the SQLite database
-    /// is encrypted with SQLCipher. The encryption key is stored in the OS-native secret store.
+    /// is encrypted by the linked engine. The encryption key is stored in the OS-native secret store.
     /// Default: false.
     /// </summary>
     public bool Enabled { get; set; }

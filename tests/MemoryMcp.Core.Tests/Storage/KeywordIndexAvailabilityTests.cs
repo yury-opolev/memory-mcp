@@ -11,7 +11,8 @@ namespace MemoryMcp.Core.Tests.Storage;
 /// <summary>
 /// The SQLCipher bundle used by this test project predates FTS5 <c>contentless_delete</c>: the keyword
 /// index must report itself unavailable and every other store operation must keep working.
-/// (The index itself is exercised on SQLite3 Multiple Ciphers in the Cortex Agent.Host tests.)
+/// (The index itself is exercised on SQLite3 Multiple Ciphers in MemoryMcp.Tests and in the Cortex
+/// Agent.Host tests.)
 /// </summary>
 public sealed class KeywordIndexAvailabilityTests : IDisposable
 {

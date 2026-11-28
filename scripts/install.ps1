@@ -11,7 +11,9 @@
 .PARAMETER SkipOllama
     Skip Ollama checks and model pull.
 .PARAMETER DataEncryption
-    Enable or disable data-at-rest encryption (AES-256-GCM for files, SQLCipher for database).
+    Enable or disable data-at-rest encryption (AES-256-GCM for files, SQLite3 Multiple Ciphers for the
+    database). An encrypted database written by an earlier release (SQLCipher) is converted on the first
+    start; the original is kept beside it as memory.db.sqlcipher-backup.
     Pass $true or $false. When omitted, the existing setting is left unchanged.
 #>
 
