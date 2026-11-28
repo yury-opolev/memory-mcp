@@ -1,11 +1,13 @@
 using MemoryMcp.Hosting;
 using MemoryMcp.Shared;
+using MemoryMcp.Shared.Service;
 using Microsoft.Extensions.Configuration;
 
+IConfigurationRoot configuration;
 ServerRole role;
 try
 {
-    var configuration = ServerConfiguration.Build(args);
+    configuration = ServerConfiguration.Build(args);
     var sharedOptions = configuration.GetSection(SharedOptions.SectionName).Get<SharedOptions>() ?? new SharedOptions();
     role = RoleSelector.Select(args, sharedOptions.Enabled);
 }
@@ -18,6 +20,11 @@ catch (ArgumentException exception)
 if (role == ServerRole.Standalone)
 {
     return await StandaloneServer.RunAsync(args);
+}
+
+if (role == ServerRole.Service)
+{
+    return await ServiceCommand.RunAsync(configuration, args);
 }
 
 Console.Error.WriteLine($"Role '{role}' is not implemented yet.");

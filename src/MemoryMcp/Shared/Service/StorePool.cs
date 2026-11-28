@@ -29,7 +29,7 @@ public sealed class StorePool : IAsyncDisposable
     private readonly CancellationTokenSource shutdown = new();
     private readonly object gate = new();
     private Task? creationTask;
-    private string? startupError;
+    private volatile string? startupError;
     private bool isDisposed;
 
     public StorePool(IStoreLaneFactory factory, int maxParallelCalls, CallMetrics metrics, ILogger<StorePool> logger, TimeProvider time)
@@ -40,6 +40,12 @@ public sealed class StorePool : IAsyncDisposable
         this.logger = logger;
         this.time = time;
     }
+
+    /// <summary>True once lane 0 finished the startup sequence successfully.</summary>
+    public bool IsReady => this.ready.Task.IsCompletedSuccessfully && this.startupError is null;
+
+    /// <summary>The message of the startup failure, or null when startup has not failed.</summary>
+    public string? StartupError => this.startupError;
 
     /// <summary>Begins creating the lanes in the background: lane 0 with startup, then the rest.</summary>
     public void Start()
