@@ -10,7 +10,7 @@ namespace MemoryMcp.Tests.Shared.EndToEnd;
 /// A fresh temp data directory for one test, with its settings.json, the server processes started for it and the
 /// commands run against it. Disposing it stops everything the test caused to start, even after a failure: the relays,
 /// then the service (<c>stop</c>, then a kill by the process id <c>status</c> reports), then any process of the test
-/// executable started since the directory was made, and deletes the directory.
+/// executable that was not running when the directory was made, and deletes the directory.
 /// </summary>
 internal sealed class EndToEndDataDirectory : IAsyncDisposable
 {
@@ -21,12 +21,18 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
     private static readonly TimeSpan pollInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly List<ServerProcess> servers = [];
-    private readonly DateTime createdAt;
+
+    /// <summary>
+    /// The processes of the test executable that were running when the directory was made. A process is told apart
+    /// by its id, not its start time: on Linux <see cref="Process.StartTime"/> is derived from the boot time in whole
+    /// seconds, so a process started just after the directory was made can report a start time before it.
+    /// </summary>
+    private readonly HashSet<int> preexistingProcessIds;
 
     private EndToEndDataDirectory(string directoryPath)
     {
         this.DirectoryPath = directoryPath;
-        this.createdAt = DateTime.Now;
+        this.preexistingProcessIds = [.. RunningTestExecutableProcessIds()];
     }
 
     public string DirectoryPath { get; }
@@ -160,30 +166,48 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
     }
 
     /// <summary>
-    /// The processes of the test executable started since this directory was made: this test's relays, commands and
-    /// services. The tests run one at a time, so no other test's processes are among them.
+    /// The processes of the test executable that were not running when this directory was made: this test's relays,
+    /// commands and services. The tests run one at a time, so no other test's processes are among them.
     /// </summary>
     public List<Process> FindStartedProcesses()
     {
         var started = new List<Process>();
+        foreach (var process in RunningTestExecutableProcesses())
+        {
+            if (this.preexistingProcessIds.Contains(process.Id))
+            {
+                process.Dispose();
+            }
+            else
+            {
+                started.Add(process);
+            }
+        }
+
+        return started;
+    }
+
+    /// <summary>The running processes of the test executable (<see cref="ServerProcess.ExecutablePath"/>).</summary>
+    private static List<Process> RunningTestExecutableProcesses()
+    {
+        var running = new List<Process>();
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ServerProcess.ExecutablePath)))
         {
-            var isStartedByThisTest = false;
+            var isTestExecutable = false;
             try
             {
-                isStartedByThisTest = !process.HasExited
-                    && string.Equals(process.MainModule?.FileName, ServerProcess.ExecutablePath, comparison)
-                    && process.StartTime >= this.createdAt;
+                isTestExecutable = !process.HasExited
+                    && string.Equals(process.MainModule?.FileName, ServerProcess.ExecutablePath, comparison);
             }
             catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or NotSupportedException)
             {
                 // It exited while being looked at, or belongs to someone else.
             }
 
-            if (isStartedByThisTest)
+            if (isTestExecutable)
             {
-                started.Add(process);
+                running.Add(process);
             }
             else
             {
@@ -191,7 +215,19 @@ internal sealed class EndToEndDataDirectory : IAsyncDisposable
             }
         }
 
-        return started;
+        return running;
+    }
+
+    private static List<int> RunningTestExecutableProcessIds()
+    {
+        var processes = RunningTestExecutableProcesses();
+        var processIds = processes.Select(process => process.Id).ToList();
+        foreach (var process in processes)
+        {
+            process.Dispose();
+        }
+
+        return processIds;
     }
 
     /// <summary>Waits until exactly <paramref name="count"/> processes of the test executable started by this test run.</summary>
