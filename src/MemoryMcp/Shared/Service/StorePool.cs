@@ -90,7 +90,7 @@ public sealed class StorePool : IAsyncDisposable
         return new StoreLease(this, lane, wait, this.time.GetTimestamp());
     }
 
-    /// <summary>Runs <paramref name="action"/> on a leased lane; a busy or locked database becomes a retryable error.</summary>
+    /// <summary>Runs <paramref name="action"/> on a leased lane; a busy or locked database becomes a <see cref="DatabaseBusyException"/>.</summary>
     public async Task<TResult> RunAsync<TResult>(string toolName, Func<StoreLane, Task<TResult>> action, CancellationToken ct)
     {
         using var lease = await this.LeaseAsync(toolName, ct).ConfigureAwait(false);
@@ -98,9 +98,9 @@ public sealed class StorePool : IAsyncDisposable
         {
             return await action(lease.Lane).ConfigureAwait(false);
         }
-        catch (SqliteException exception) when (exception.SqliteErrorCode is SqliteBusy or SqliteLocked)
+        catch (Exception exception) when (FindBusyError(exception) is { } busy)
         {
-            throw new InvalidOperationException("The memory database is busy. Retry the call.", exception);
+            throw new DatabaseBusyException(busy);
         }
     }
 
@@ -144,6 +144,23 @@ public sealed class StorePool : IAsyncDisposable
     {
         this.metrics.Record(wait, this.time.GetElapsedTime(runStartTimestamp));
         this.ReturnLane(lane);
+    }
+
+    /// <summary>
+    /// The busy or locked <see cref="SqliteException"/> behind <paramref name="exception"/> (itself or its inner
+    /// exception), matched on the primary result code so extended codes such as 517 and 262 count too.
+    /// </summary>
+    private static SqliteException? FindBusyError(Exception exception)
+    {
+        foreach (var candidate in new[] { exception, exception.InnerException })
+        {
+            if (candidate is SqliteException sqlite && (sqlite.SqliteErrorCode & 0xFF) is SqliteBusy or SqliteLocked)
+            {
+                return sqlite;
+            }
+        }
+
+        return null;
     }
 
     private void ReturnLane(StoreLane lane)

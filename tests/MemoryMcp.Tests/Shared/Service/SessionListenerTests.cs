@@ -6,6 +6,7 @@ using MemoryMcp.Core.Services;
 using MemoryMcp.Shared;
 using MemoryMcp.Shared.Service;
 using MemoryMcp.Tools;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -134,6 +135,45 @@ public sealed class SessionListenerTests : IAsyncDisposable
         var tools = await client.Client.ListToolsAsync(cancellationToken: Token);
         Assert.Equal(5, tools.Count);
         Assert.Equal(1, listener.ActiveSessions);
+    }
+
+    [Theory]
+    [InlineData("ingest_memory", "content", "some text")]
+    [InlineData("get_memory", "id", "x")]
+    [InlineData("update_memory", "content", "new text")]
+    [InlineData("delete_memory", "id", "x")]
+    [InlineData("search_memory", "query", "anything")]
+    public async Task ToolCall_WhenTheDatabaseIsBusy_ReturnsRetryableError_AndSessionStaysUsable(string tool, string argument, string value)
+    {
+        var busy = new SqliteException("database is locked", 5);
+        var laneMemory = Substitute.For<IMemoryService>();
+        laneMemory.IngestAsync(Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<IngestResult>(busy));
+        laneMemory.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<MemoryResult?>(busy));
+        laneMemory.UpdateAsync(Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<List<string>?>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<MemoryResult?>(busy));
+        laneMemory.DeleteAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<bool>(busy));
+        var laneSearch = Substitute.For<IHybridMemorySearch>();
+        laneSearch.SearchAsync(Arg.Any<HybridSearchRequest>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<HybridSearchResult>(busy));
+        var factory = Substitute.For<IStoreLaneFactory>();
+        factory.CreateAsync(Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromResult(new StoreLane(laneMemory, laneSearch, Substitute.For<IAsyncDisposable>())));
+        var services = this.PooledServices(factory, new CallMetrics(), out var pool);
+        this.Start(this.NewListener(services));
+        pool.Start();
+        var client = await this.ConnectAsync(this.pipeName);
+        var arguments = new Dictionary<string, object?> { [argument] = value };
+        if (tool == "update_memory")
+        {
+            arguments["id"] = "x";
+        }
+
+        var result = await client.Client.CallToolAsync(tool, arguments, cancellationToken: Token);
+
+        Assert.True(result.IsError);
+        Assert.Contains("The memory database is busy. Retry the call.", McpPipeClient.Text(result), StringComparison.Ordinal);
+        var second = await client.Client.CallToolAsync(tool, arguments, cancellationToken: Token);
+        Assert.Contains("The memory database is busy. Retry the call.", McpPipeClient.Text(second), StringComparison.Ordinal);
+        var tools = await client.Client.ListToolsAsync(cancellationToken: Token);
+        Assert.Equal(5, tools.Count);
     }
 
     [Fact]

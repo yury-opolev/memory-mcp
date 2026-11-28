@@ -4,6 +4,7 @@ using MemoryMcp.Core.Services;
 using MemoryMcp.Shared.Service;
 using Microsoft.Data.Sqlite;
 using NSubstitute;
+using ModelContextProtocol;
 using Xunit;
 
 namespace MemoryMcp.Tests.Shared.Service;
@@ -111,6 +112,8 @@ public class PooledMemoryServiceTests
     [Theory]
     [InlineData(5)]
     [InlineData(6)]
+    [InlineData(517)]
+    [InlineData(262)]
     public async Task BusyDatabase_BecomesRetryableError(int sqliteErrorCode)
     {
         var (pool, metrics, memory, _) = NewPool();
@@ -119,11 +122,28 @@ public class PooledMemoryServiceTests
         memory.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<MemoryResult?>(busy));
         var service = new PooledMemoryService(pool);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetAsync("id", Token));
+        var exception = await Assert.ThrowsAsync<DatabaseBusyException>(() => service.GetAsync("id", Token));
 
-        Assert.Contains("busy", exception.Message);
+        Assert.IsAssignableFrom<McpException>(exception);
+        Assert.Equal("The memory database is busy. Retry the call.", exception.Message);
         Assert.Same(busy, exception.InnerException);
         Assert.Equal(1, metrics.Snapshot().Calls);
+    }
+
+    [Fact]
+    public async Task BusyDatabase_WrappedInAnotherException_BecomesRetryableError()
+    {
+        var (pool, _, memory, _) = NewPool();
+        await using var owner = pool;
+        var busy = new SqliteException("database is locked", 5);
+        var wrapped = new InvalidOperationException("the store failed", busy);
+        memory.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<MemoryResult?>(wrapped));
+        var service = new PooledMemoryService(pool);
+
+        var exception = await Assert.ThrowsAsync<DatabaseBusyException>(() => service.GetAsync("id", Token));
+
+        Assert.Equal("The memory database is busy. Retry the call.", exception.Message);
+        Assert.Same(busy, exception.InnerException);
     }
 
     [Fact]
