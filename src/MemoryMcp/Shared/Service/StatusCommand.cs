@@ -10,10 +10,41 @@ public static class StatusCommand
     public const int RunningExitCode = 0;
     public const int NotRunningExitCode = 3;
 
-    public static Task<int> RunAsync(IConfigurationRoot configuration)
+    /// <summary>Prints only the launcher hash of the data directory (for the install scripts) and contacts no service.</summary>
+    public const string PrintHashOption = "--print-hash";
+
+    public static Task<int> RunAsync(IConfigurationRoot configuration, string[] args)
     {
+        if (IsPrintHash(args))
+        {
+            return PrintHashAsync(PrintHashDataDirectory(args), Console.Out);
+        }
+
         var dataDirectory = ServerConfiguration.DataDirectory(configuration);
         return RunAsync(dataDirectory, PipeNames.Control(dataDirectory), Console.Out, CancellationToken.None);
+    }
+
+    public static bool IsPrintHash(string[] args)
+    {
+        return args.Contains(PrintHashOption, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The data directory for <see cref="PrintHashOption"/>. The command line configuration reads a bare
+    /// <c>--print-hash</c> as a key whose value is the next argument, which would swallow a data directory given after
+    /// it, so the configuration is built again from the arguments without the flag.
+    /// </summary>
+    public static string PrintHashDataDirectory(string[] args)
+    {
+        string[] settingArguments = [.. args.Where(argument => !string.Equals(argument, PrintHashOption, StringComparison.Ordinal))];
+        return ServerConfiguration.DataDirectory(ServerConfiguration.Build(settingArguments));
+    }
+
+    /// <summary>Prints the <see cref="PipeNames.Hash"/> of <paramref name="dataDirectory"/> as the only line and exits 0.</summary>
+    public static async Task<int> PrintHashAsync(string dataDirectory, TextWriter output)
+    {
+        await output.WriteLineAsync(PipeNames.Hash(dataDirectory)).ConfigureAwait(false);
+        return 0;
     }
 
     /// <summary>Exits 0 and prints the <see cref="ControlResponse"/> fields as lines when running; else exits 3.</summary>

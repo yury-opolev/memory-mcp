@@ -84,6 +84,35 @@ public sealed class ControlCommandsTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task PrintHash_PrintsOnlyTheHash_AndExitsZero()
+    {
+        var exitCode = await StatusCommand.PrintHashAsync(this.dataDirectory, this.output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(PipeNames.Hash(this.dataDirectory) + Environment.NewLine, this.output.ToString());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void PrintHashDataDirectory_ReadsTheDataDirectory_WhereverTheFlagStands(bool isFlagFirst)
+    {
+        var dataDirectoryArgument = "--MemoryMcp:DataDirectory=" + this.dataDirectory;
+        string[] args = isFlagFirst
+            ? ["status", StatusCommand.PrintHashOption, dataDirectoryArgument]
+            : ["status", dataDirectoryArgument, StatusCommand.PrintHashOption];
+
+        Assert.True(StatusCommand.IsPrintHash(args));
+        Assert.Equal(Path.GetFullPath(this.dataDirectory), StatusCommand.PrintHashDataDirectory(args));
+    }
+
+    [Fact]
+    public void IsPrintHash_WithoutTheFlag_IsFalse()
+    {
+        Assert.False(StatusCommand.IsPrintHash(["status", "--MemoryMcp:DataDirectory=" + this.dataDirectory]));
+    }
+
+    [Fact]
     public async Task Stop_NothingListening_OnlySetsTheMarker()
     {
         var exitCode = await StopCommand.RunAsync(this.dataDirectory, this.controlPipe, this.output, this.error, Token);

@@ -25,6 +25,6 @@ return role switch
     ServerRole.Service => await ServiceCommand.RunAsync(configuration, args),
     ServerRole.Start => await StartCommand.RunAsync(configuration),
     ServerRole.Stop => await StopCommand.RunAsync(configuration),
-    ServerRole.Status => await StatusCommand.RunAsync(configuration),
+    ServerRole.Status => await StatusCommand.RunAsync(configuration, args),
     _ => throw new InvalidOperationException($"Role '{role}' has no command."),
 };

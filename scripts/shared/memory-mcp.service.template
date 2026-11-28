@@ -1,0 +1,16 @@
+# The memory-mcp shared memory service for one data directory, written by scripts/install.sh --shared true as
+# ~/.config/systemd/user/memory-mcp-<hash>.service. The install script fills in the @...@ values, escaped for
+# systemd (quotes, backslashes, % and $). Do not edit the installed copy: the next install rewrites it.
+[Unit]
+Description=memory-mcp shared memory service (@DESCRIPTION@)
+
+[Service]
+Type=simple
+WorkingDirectory=~
+Environment="DOTNET_ROOT=@DOTNET_ROOT@"
+ExecStart="@SERVICE_EXE@" serve "--MemoryMcp:DataDirectory=@DATA_DIR@"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
