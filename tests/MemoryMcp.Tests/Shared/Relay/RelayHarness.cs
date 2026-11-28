@@ -8,6 +8,9 @@ namespace MemoryMcp.Tests.Shared.Relay;
 /// <summary>A running <see cref="RelaySession"/> over in-memory client streams, a fake connector and a manual clock.</summary>
 internal sealed class RelayHarness : IAsyncDisposable
 {
+    /// <summary>The log directory the relay names in an unreachable message.</summary>
+    public static readonly string LogDirectory = Path.Combine("data", "logs");
+
     private readonly Pipe clientToRelay = new();
     private readonly Pipe relayToClient = new();
     private readonly CancellationTokenSource hangGuard;
@@ -23,7 +26,8 @@ internal sealed class RelayHarness : IAsyncDisposable
             this.relayToClient.Writer.AsStream(),
             this.Connector,
             this.Logger,
-            this.Time);
+            this.Time,
+            LogDirectory);
         this.Run = session.RunAsync(this.Token);
     }
 

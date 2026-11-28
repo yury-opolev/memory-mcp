@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Text;
 using MemoryMcp.Shared;
 using MemoryMcp.Shared.Launch;
@@ -84,7 +85,7 @@ public sealed class PipeServiceConnectorTests : IAsyncDisposable
         var result = await this.CreateConnector(launcher).ConnectAsync(ConnectTimeout, Token);
 
         Assert.Equal(ConnectFailure.StoppedOnPurpose, result.Failure);
-        Assert.Equal(RelayMessages.StoppedOnPurpose, result.Message);
+        Assert.Equal(RelayMessages.StoppedOnPurpose(this.dataDirectory), result.Message);
         Assert.Null(result.Stream);
         Assert.Equal(0, launcher.StartCount);
     }
@@ -173,6 +174,87 @@ public sealed class PipeServiceConnectorTests : IAsyncDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
     }
 
+    [Fact]
+    public void ClientPipeOptions_AreAsynchronousAndCurrentUserOnly()
+    {
+        Assert.True(PipeServiceConnector.ClientPipeOptions.HasFlag(PipeOptions.Asynchronous));
+        Assert.True(PipeServiceConnector.ClientPipeOptions.HasFlag(PipeOptions.CurrentUserOnly));
+    }
+
+    [Fact]
+    public async Task PipeRefusesThisSession_ReturnsAccessDeniedAtOnce_AndStartsNothing()
+    {
+        var launcher = new FakeServiceLauncher("os", isRegistered: true);
+        var openCount = 0;
+        var connector = this.CreateConnector(
+            [launcher],
+            launcherCallTimeout: ServiceLauncherFactory.LauncherCallTimeout,
+            openPipe: (_, _, _) =>
+            {
+                Interlocked.Increment(ref openCount);
+                throw new UnauthorizedAccessException("Access to the path is denied.");
+            });
+
+        var result = await connector.ConnectAsync(ConnectTimeout, Token);
+
+        Assert.Equal(ConnectFailure.AccessDenied, result.Failure);
+        Assert.Equal(RelayMessages.AccessDenied, result.Message);
+        Assert.Null(result.Stream);
+        Assert.Equal(1, openCount);
+        Assert.Equal(0, launcher.StartCount);
+    }
+
+    [Fact]
+    public async Task OsLauncherStarts_DetachedIsNotAsked()
+    {
+        TestPipeListener? listener = null;
+        var osLauncher = new FakeServiceLauncher("os", isRegistered: true, onStart: () => listener = this.StartListener());
+        var detached = new FakeServiceLauncher("detached", isRegistered: true);
+
+        var result = await this.CreateConnector(osLauncher, detached).ConnectAsync(ConnectTimeout, Token);
+
+        Assert.NotNull(listener);
+        await this.AssertConnectedAsync(result, listener);
+        Assert.Equal(1, osLauncher.StartCount);
+        Assert.Equal(0, detached.StartCount);
+    }
+
+    [Fact]
+    public async Task OsLauncherRefusesTheStart_FallsBackToDetached()
+    {
+        TestPipeListener? listener = null;
+        var osLauncher = new FakeServiceLauncher("os", isRegistered: true, isStartAccepted: false);
+        var detached = new FakeServiceLauncher("detached", isRegistered: true, onStart: () => listener = this.StartListener());
+
+        var result = await this.CreateConnector(osLauncher, detached).ConnectAsync(ConnectTimeout, Token);
+
+        Assert.NotNull(listener);
+        await this.AssertConnectedAsync(result, listener);
+        Assert.Equal(1, osLauncher.StartCount);
+        Assert.Equal(1, detached.StartCount);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task OsLauncherNeverAnswers_FallsBackToDetachedAfterTheCallTimeout(bool isHangingOnIsRegistered, bool isHangingOnStart)
+    {
+        TestPipeListener? listener = null;
+        var osLauncher = new FakeServiceLauncher(
+            "os",
+            isRegistered: true,
+            isHangingOnIsRegistered: isHangingOnIsRegistered,
+            isHangingOnStart: isHangingOnStart);
+        var detached = new FakeServiceLauncher("detached", isRegistered: true, onStart: () => listener = this.StartListener());
+        var connector = this.CreateConnector([osLauncher, detached], TimeSpan.FromMilliseconds(500), PipeServiceConnector.OpenPipeAsync);
+
+        var result = await connector.ConnectAsync(ConnectTimeout, Token);
+
+        Assert.NotNull(listener);
+        await this.AssertConnectedAsync(result, listener);
+        Assert.Equal(1, detached.StartCount);
+    }
+
     private async Task AssertConnectedAsync(ConnectResult result, TestPipeListener listener)
     {
         Assert.Equal(ConnectFailure.None, result.Failure);
@@ -197,6 +279,21 @@ public sealed class PipeServiceConnectorTests : IAsyncDisposable
             this.pipeName,
             launchers,
             NullLogger.Instance);
+    }
+
+    private PipeServiceConnector CreateConnector(
+        IServiceLauncher[] launchers,
+        TimeSpan launcherCallTimeout,
+        Func<string, TimeSpan, CancellationToken, Task<Stream>> openPipe)
+    {
+        return new PipeServiceConnector(
+            ["--MemoryMcp:DataDirectory=" + this.dataDirectory],
+            this.dataDirectory,
+            this.pipeName,
+            launchers,
+            NullLogger.Instance,
+            launcherCallTimeout,
+            openPipe);
     }
 
     private TestPipeListener StartListener()

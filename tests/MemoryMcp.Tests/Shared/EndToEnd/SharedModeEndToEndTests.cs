@@ -132,9 +132,9 @@ public sealed class SharedModeEndToEndTests : IAsyncDisposable
         Assert.Equal(0, stop.ExitCode);
 
         var stopped = await CallGetMemoryPastLostConnectionAsync(relay, id, ct);
-        Assert.Equal(RelayMessages.StoppedOnPurpose, ServerProcess.ErrorMessage(stopped));
+        Assert.Equal(RelayMessages.StoppedOnPurpose(this.directory.DirectoryPath), ServerProcess.ErrorMessage(stopped));
         var stoppedAgain = await CallGetMemoryAsync(relay, id, ct);
-        Assert.Equal(RelayMessages.StoppedOnPurpose, ServerProcess.ErrorMessage(stoppedAgain));
+        Assert.Equal(RelayMessages.StoppedOnPurpose(this.directory.DirectoryPath), ServerProcess.ErrorMessage(stoppedAgain));
 
         // The relay answered from the stop marker and started nothing: the service is still down.
         var status = await this.directory.StatusAsync(ct);

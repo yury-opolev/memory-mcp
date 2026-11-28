@@ -6,6 +6,67 @@ namespace MemoryMcp.Tests.Shared.Relay;
 
 public sealed class RelaySessionTests
 {
+    private static readonly string stoppedMessage = RelayMessages.StoppedOnPurpose(Path.Combine("data", "memory-mcp"));
+
+    [Fact]
+    public async Task InitialConnectThrows_InitializeGetsTheUnreachableMessage_AndRunReturnsOne()
+    {
+        await using var relay = RelayHarness.Start();
+        relay.Connector.EnqueueException(new InvalidOperationException("the launcher broke"));
+
+        await relay.SendAsync(Lines.Initialize);
+
+        Assert.Equal(1, await relay.WaitForExitAsync());
+        Lines.AssertError(await relay.ReadLineAsync(), "1", RelayMessages.Unreachable(30, RelayHarness.LogDirectory));
+        Assert.Null(await relay.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task InitialConnectAccessDenied_InitializeGetsTheAccessDeniedMessage_AndRunReturnsOne()
+    {
+        await using var relay = RelayHarness.Start();
+        relay.Connector.EnqueueFailure(ConnectFailure.AccessDenied, RelayMessages.AccessDenied);
+
+        await relay.SendAsync(Lines.Initialize);
+
+        Assert.Equal(1, await relay.WaitForExitAsync());
+        Lines.AssertError(await relay.ReadLineAsync(), "1", RelayMessages.AccessDenied);
+        Assert.Null(await relay.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task RequestWhileAccessDenied_IsAnsweredAtOnce_AndTheRelayKeepsRetrying()
+    {
+        await using var relay = RelayHarness.Start();
+        var firstService = relay.Connector.EnqueueConnection();
+        await relay.HandshakeAsync(firstService);
+        relay.Connector.EnqueueFailure(ConnectFailure.AccessDenied, RelayMessages.AccessDenied);
+        firstService.Close();
+        await relay.Time.WaitForScheduledTimersAsync(1, relay.Token);
+
+        await relay.SendAsync(Lines.ToolCall("50"));
+
+        Lines.AssertError(await relay.ReadLineAsync(), "50", RelayMessages.AccessDenied);
+        var secondService = relay.Connector.EnqueueConnection();
+        relay.Time.Advance(TimeSpan.FromMilliseconds(250));
+        Assert.Contains("relay-replay", await secondService.ReadLineAsync(relay.Token));
+        Assert.Equal([RelaySession.InitialConnectTimeout, RelaySession.ReconnectTimeout, RelaySession.ReconnectTimeout], relay.Connector.Timeouts);
+    }
+
+    [Fact]
+    public void Messages_HaveTheirAgreedTexts()
+    {
+        Assert.Equal(
+            "The memory service connection was lost while this call was running. The call may or may not have completed; check before repeating a write.",
+            RelayMessages.ConnectionLost);
+        Assert.Equal(
+            "The memory service is running, but this session is not allowed to connect to it. This happens when the session runs elevated (as administrator) and the service does not, or the other way round. Start the session at the same elevation as the service.",
+            RelayMessages.AccessDenied);
+        Assert.Equal(
+            "The memory service was stopped on purpose. Run `MemoryMcp start --MemoryMcp:DataDirectory=\"/data/my memory\"` to start it again.",
+            RelayMessages.StoppedOnPurpose("/data/my memory"));
+    }
+
     [Fact]
     public async Task ForwardsClientLinesToService_AndServiceLinesToClient_Unchanged()
     {
@@ -254,18 +315,18 @@ public sealed class RelaySessionTests
     }
 
     [Fact]
-    public async Task RequestWhileStoppedOnPurpose_GetsStoppedMessage_AndRelayRecoversWhenServiceReturns()
+    public async Task RequestWhileStoppedOnPurpose_GetsstoppedMessage_AndRelayRecoversWhenServiceReturns()
     {
         await using var relay = RelayHarness.Start();
         var firstService = relay.Connector.EnqueueConnection();
         await relay.HandshakeAsync(firstService);
-        relay.Connector.EnqueueFailure(ConnectFailure.StoppedOnPurpose, RelayMessages.StoppedOnPurpose);
+        relay.Connector.EnqueueFailure(ConnectFailure.StoppedOnPurpose, stoppedMessage);
         firstService.Close();
         await relay.Time.WaitForScheduledTimersAsync(1, relay.Token);
 
         await relay.SendAsync(Lines.ToolCall("20"));
 
-        Lines.AssertError(await relay.ReadLineAsync(), "20", RelayMessages.StoppedOnPurpose);
+        Lines.AssertError(await relay.ReadLineAsync(), "20", stoppedMessage);
         Assert.Equal(1, relay.Time.ScheduledTimerCount);
         var secondService = relay.Connector.EnqueueConnection();
         relay.Time.Advance(TimeSpan.FromMilliseconds(250));
@@ -289,9 +350,9 @@ public sealed class RelaySessionTests
         await relay.SendAsync(Lines.ToolCall("22"));
         await relay.Time.WaitForScheduledTimersAsync(1, relay.Token);
 
-        relay.Connector.EnqueueFailure(ConnectFailure.StoppedOnPurpose, RelayMessages.StoppedOnPurpose);
+        relay.Connector.EnqueueFailure(ConnectFailure.StoppedOnPurpose, stoppedMessage);
 
-        Lines.AssertError(await relay.ReadLineAsync(), "22", RelayMessages.StoppedOnPurpose);
+        Lines.AssertError(await relay.ReadLineAsync(), "22", stoppedMessage);
     }
 
     [Fact]
@@ -358,5 +419,110 @@ public sealed class RelaySessionTests
         Assert.Equal(0, await relay.WaitForExitAsync());
         Assert.Equal([RelaySession.InitialConnectTimeout], relay.Connector.Timeouts);
         Assert.Null(await relay.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task ServiceAnswersAndCloses_WhileTheNextCallCannotBeWritten_TheAnswerIsDelivered_AndOnlyTheUnsentCallIsLost()
+    {
+        await using var relay = RelayHarness.Start();
+        var service = relay.Connector.EnqueueConnection();
+        await relay.HandshakeAsync(service);
+        await relay.SendAsync(Lines.ToolCall("40"));
+        Assert.Equal(Lines.ToolCall("40"), await service.ReadLineAsync(relay.Token));
+
+        // The service exits after it answered call 40: the relay's write of call 41 fails before it read that answer.
+        service.BreakRelayWrites();
+        await relay.SendAsync(Lines.ToolCall("41"));
+        await service.RelayStream.WriteFailed.WaitAsync(relay.Token);
+        await service.WriteLineAsync(Lines.ToolResult("40"), relay.Token);
+        service.Close();
+
+        Assert.Equal(Lines.ToolResult("40"), await relay.ReadLineAsync());
+        Lines.AssertError(await relay.ReadLineAsync(), "41", RelayMessages.ConnectionLost);
+        await relay.Connector.WaitForCallsAsync(2, relay.Token);
+        relay.CloseInput();
+        Assert.Equal(0, await relay.WaitForExitAsync());
+        Assert.Null(await relay.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task CallAfterAFailedWrite_WaitsForTheNextConnection()
+    {
+        await using var relay = RelayHarness.Start();
+        var firstService = relay.Connector.EnqueueConnection();
+        await relay.HandshakeAsync(firstService);
+        firstService.BreakRelayWrites();
+        await relay.SendAsync(Lines.ToolCall("42"));
+        await firstService.RelayStream.WriteFailed.WaitAsync(relay.Token);
+
+        // The connection cannot take this call any more, so it waits instead of being written to a dead pipe.
+        await relay.SendAsync(Lines.ToolCall("43"));
+        await relay.Time.WaitForScheduledTimersAsync(1, relay.Token);
+        var secondService = relay.Connector.EnqueueConnection();
+        firstService.Close();
+
+        Lines.AssertError(await relay.ReadLineAsync(), "42", RelayMessages.ConnectionLost);
+        Assert.Contains("relay-replay", await secondService.ReadLineAsync(relay.Token));
+        await secondService.WriteLineAsync(Lines.ReplayResult, relay.Token);
+        Assert.Equal(Lines.Initialized, await secondService.ReadLineAsync(relay.Token));
+        Assert.Equal(Lines.ToolCall("43"), await secondService.ReadLineAsync(relay.Token));
+        await secondService.WriteLineAsync(Lines.ToolResult("43"), relay.Token);
+        Assert.Equal(Lines.ToolResult("43"), await relay.ReadLineAsync());
+    }
+
+    [Theory]
+    [InlineData("5.0", "5")]
+    [InlineData("\"a/b\"", "\"a\\/b\"")]
+    public async Task ResponseWithReencodedId_EndsTheCall_SoALaterDropReportsNothingForIt(string requestIdRaw, string responseIdRaw)
+    {
+        await using var relay = RelayHarness.Start();
+        var service = relay.Connector.EnqueueConnection();
+        await relay.HandshakeAsync(service);
+        await relay.SendAsync(Lines.ToolCall(requestIdRaw));
+        Assert.Equal(Lines.ToolCall(requestIdRaw), await service.ReadLineAsync(relay.Token));
+        await service.WriteLineAsync(Lines.ToolResult(responseIdRaw), relay.Token);
+        Assert.Equal(Lines.ToolResult(responseIdRaw), await relay.ReadLineAsync());
+
+        service.Close();
+        await relay.Connector.WaitForCallsAsync(2, relay.Token);
+
+        relay.CloseInput();
+        Assert.Equal(0, await relay.WaitForExitAsync());
+        Assert.Null(await relay.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task InitializeLostInFlight_IsAnsweredAsLost_AndNotReplayedToTheNextConnection()
+    {
+        await using var relay = RelayHarness.Start();
+        var firstService = relay.Connector.EnqueueConnection();
+        await relay.SendAsync(Lines.Initialize);
+        Assert.Equal(Lines.Initialize, await firstService.ReadLineAsync(relay.Token));
+        var secondService = relay.Connector.EnqueueConnection();
+
+        firstService.Close();
+
+        Lines.AssertError(await relay.ReadLineAsync(), "1", RelayMessages.ConnectionLost);
+
+        // The client starts the handshake again; the new connection sees it as the first line, not a replay.
+        await relay.SendAsync(Lines.Initialize);
+        Assert.Equal(Lines.Initialize, await secondService.ReadLineAsync(relay.Token));
+        await secondService.WriteLineAsync(Lines.InitializeResult, relay.Token);
+        Assert.Equal(Lines.InitializeResult, await relay.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task ClientClosesInput_WhileTheConnectionIgnoresCancellation_RunStillEnds()
+    {
+        await using var relay = RelayHarness.Start();
+        var stream = new CancellationIgnoringStream();
+        relay.Connector.EnqueueStream(stream, stream);
+        await relay.SendAsync(Lines.Initialize);
+        await stream.Written.WaitAsync(relay.Token);
+
+        relay.CloseInput();
+
+        var exitCode = await relay.Run.WaitAsync(TimeSpan.FromSeconds(10), relay.Token);
+        Assert.Equal(0, exitCode);
     }
 }

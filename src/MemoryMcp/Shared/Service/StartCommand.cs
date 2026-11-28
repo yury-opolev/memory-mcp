@@ -20,8 +20,9 @@ public static class StartCommand
     }
 
     /// <summary>
-    /// Clears the stop marker; when the service is not running, starts it once with the first registered launcher
-    /// and waits until it answers <c>status</c>. Exits 0 when it runs, 1 when it could not be started in time.
+    /// Clears the stop marker; when the service is not running, starts it once with the first launcher that accepts
+    /// (one that fails or times out hands over to the next) and waits until it answers <c>status</c>. Exits 0 when it
+    /// runs, 1 when it could not be started in time.
     /// </summary>
     public static async Task<int> RunAsync(
         string dataDirectory,
@@ -45,19 +46,19 @@ public static class StartCommand
         }
 
         var started = DateTime.UtcNow;
-        IServiceLauncher? launcher;
-        try
-        {
-            launcher = await ServiceLauncherFactory.StartWithFirstRegisteredAsync(launchers, ct).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            await error.WriteLineAsync($"The memory service could not be started: {exception.Message}").ConfigureAwait(false);
-            return 1;
-        }
-
+        var failures = new List<string>();
+        var launcher = await ServiceLauncherFactory.StartFirstAvailableAsync(
+            launchers,
+            ServiceLauncherFactory.LauncherCallTimeout,
+            failures.Add,
+            ct).ConfigureAwait(false);
         if (launcher is null)
         {
+            foreach (var failure in failures)
+            {
+                await error.WriteLineAsync(failure).ConfigureAwait(false);
+            }
+
             await error.WriteLineAsync("The memory service could not be started: no launcher accepted the request.").ConfigureAwait(false);
             return 1;
         }

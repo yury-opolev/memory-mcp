@@ -41,7 +41,7 @@ public static class RelayCommand
             logger);
         await using var clientInput = Console.OpenStandardInput();
         await using var clientOutput = Console.OpenStandardOutput();
-        var session = new RelaySession(clientInput, clientOutput, connector, logger, TimeProvider.System);
+        var session = new RelaySession(clientInput, clientOutput, connector, logger, TimeProvider.System, SharedPaths.LogDirectory(dataDirectory));
         return await session.RunAsync(CancellationToken.None).ConfigureAwait(false);
     }
 }

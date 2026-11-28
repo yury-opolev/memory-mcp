@@ -26,6 +26,12 @@ internal sealed class FakeServiceEnd
         return PipeLines.WriteLineAsync(this.serviceToRelay.Writer, line, ct);
     }
 
+    /// <summary>Makes the relay's writes to this service fail, as when the service process has gone, while it can still read what was sent.</summary>
+    public void BreakRelayWrites()
+    {
+        this.RelayStream.BreakWrites();
+    }
+
     /// <summary>Drops the connection from the service side: the relay reads the end of its input.</summary>
     public void Close()
     {

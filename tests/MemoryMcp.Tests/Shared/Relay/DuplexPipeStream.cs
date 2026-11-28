@@ -9,7 +9,9 @@ internal sealed class DuplexPipeStream : Stream
     private readonly PipeWriter output;
     private readonly Stream inputStream;
     private readonly Stream outputStream;
+    private readonly TaskCompletionSource writeFailed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int isDisposed;
+    private volatile bool isWriteBroken;
 
     public DuplexPipeStream(PipeReader input, PipeWriter output)
     {
@@ -20,6 +22,9 @@ internal sealed class DuplexPipeStream : Stream
     }
 
     public bool IsDisposed => Volatile.Read(ref this.isDisposed) == 1;
+
+    /// <summary>Completes when a write failed after <see cref="BreakWrites"/>.</summary>
+    public Task WriteFailed => this.writeFailed.Task;
 
     public override bool CanRead => true;
 
@@ -57,12 +62,20 @@ internal sealed class DuplexPipeStream : Stream
 
     public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        this.ThrowIfWriteBroken();
         return this.outputStream.WriteAsync(buffer, cancellationToken);
     }
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
+        this.ThrowIfWriteBroken();
         return this.outputStream.WriteAsync(buffer, offset, count, cancellationToken);
+    }
+
+    /// <summary>Makes every later write fail as on a broken pipe, while reading goes on.</summary>
+    public void BreakWrites()
+    {
+        this.isWriteBroken = true;
     }
 
     public override void Flush()
@@ -73,6 +86,15 @@ internal sealed class DuplexPipeStream : Stream
     public override Task FlushAsync(CancellationToken cancellationToken)
     {
         return this.outputStream.FlushAsync(cancellationToken);
+    }
+
+    private void ThrowIfWriteBroken()
+    {
+        if (this.isWriteBroken)
+        {
+            this.writeFailed.TrySetResult();
+            throw new IOException("Pipe is broken.");
+        }
     }
 
     public override long Seek(long offset, SeekOrigin origin)

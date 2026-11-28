@@ -14,4 +14,10 @@ public enum ConnectFailure
 
     /// <summary>Shared mode was switched off; a relay must not start a service.</summary>
     SharedModeOff,
+
+    /// <summary>
+    /// A service listens, but this process may not connect to it (on Windows, a different elevation); starting
+    /// another service would not help.
+    /// </summary>
+    AccessDenied,
 }

@@ -30,21 +30,23 @@ public sealed class RelaySession
     private const string InitializeMethod = "initialize";
     private const string InitializedMethod = "notifications/initialized";
     private const string ReplayId = "relay-replay";
-    private const string ReplayIdRaw = "\"" + ReplayId + "\"";
 
     private static readonly TimeSpan FirstRetryDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan LongestRetryDelay = TimeSpan.FromSeconds(2);
     private static readonly byte[] newline = "\n"u8.ToArray();
     private static readonly JsonWriterOptions errorWriterOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private static readonly JsonSerializerOptions replayWriterOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly string replayIdKey = JsonRpcPeek.StringIdKey(ReplayId);
 
     private readonly Stream clientInput;
     private readonly Stream clientOutput;
     private readonly IServiceConnector connector;
     private readonly ILogger logger;
     private readonly TimeProvider time;
+    private readonly string logDirectory;
     private readonly Channel<Func<Task>> work = Channel.CreateUnbounded<Func<Task>>(new UnboundedChannelOptions { SingleReader = true });
-    private readonly HashSet<string> inFlightIds = [];
+    /// <summary>The calls forwarded and not yet answered: the canonical id key, and the id as the client wrote it.</summary>
+    private readonly Dictionary<string, string> inFlightIds = [];
     private readonly LinkedList<(byte[] Line, string? RequestIdRaw, ITimer? Deadline)> waitingLines = new();
 
     private CancellationToken sessionToken;
@@ -57,25 +59,36 @@ public sealed class RelaySession
     private TimeSpan nextRetryDelay = FirstRetryDelay;
     private ConnectResult? lastFailure;
     private bool isReplaying;
+    private bool isServiceWriteFailed;
     private bool isSharedModeOff;
     private bool hasStartedConnecting;
     private bool hasConnected;
     private int? exitCode;
     private byte[]? initializeLine;
-    private string? initializeIdRaw;
+    private string? initializeIdKey;
     private byte[]? initializedLine;
 
-    public RelaySession(Stream clientInput, Stream clientOutput, IServiceConnector connector, ILogger logger, TimeProvider time)
+    /// <param name="clientInput">The client's requests.</param>
+    /// <param name="clientOutput">Where responses to the client go.</param>
+    /// <param name="connector">Opens connections to the service.</param>
+    /// <param name="logger">The relay's log.</param>
+    /// <param name="time">The clock of the waits and retries.</param>
+    /// <param name="logDirectory">The service's log directory, named in the message of a connection attempt that failed.</param>
+    public RelaySession(Stream clientInput, Stream clientOutput, IServiceConnector connector, ILogger logger, TimeProvider time, string logDirectory)
     {
         this.clientInput = clientInput;
         this.clientOutput = clientOutput;
         this.connector = connector;
         this.logger = logger;
         this.time = time;
+        this.logDirectory = logDirectory;
     }
 
-    /// <summary>True when client lines go straight to the service: connected, and any replayed handshake answered.</summary>
-    private bool IsReady => this.service is not null && !this.isReplaying;
+    /// <summary>
+    /// True when client lines go straight to the service: connected, any replayed handshake answered, and no write to
+    /// the connection has failed (a connection that cannot be written to is only read to its end).
+    /// </summary>
+    private bool IsReady => this.service is not null && !this.isReplaying && !this.isServiceWriteFailed;
 
     /// <summary>
     /// Relays until the client closes its input (returns 0) or the first connection fails (returns 1, after the
@@ -156,13 +169,19 @@ public sealed class RelaySession
         }
     }
 
+    /// <summary>A failure that waiting for the connection would not cure, so requests are answered with it at once.</summary>
+    private static bool IsAnsweredAtOnce(ConnectFailure failure)
+    {
+        return failure is ConnectFailure.StoppedOnPurpose or ConnectFailure.SharedModeOff or ConnectFailure.AccessDenied;
+    }
+
     /// <summary>
-    /// The message a request gets at once while the connection is down: the service was stopped on purpose or shared
-    /// mode was switched off. Null when the request should wait for the connection.
+    /// The message a request gets at once while the connection is down: the service was stopped on purpose, shared
+    /// mode was switched off, or this session may not connect to the service. Null when the request should wait.
     /// </summary>
     private string? GetImmediateFailureMessage()
     {
-        if (this.service is null && this.lastFailure is { Failure: ConnectFailure.StoppedOnPurpose or ConnectFailure.SharedModeOff } failure)
+        if (this.service is null && this.lastFailure is { } failure && IsAnsweredAtOnce(failure.Failure))
         {
             return failure.Message;
         }
@@ -193,14 +212,14 @@ public sealed class RelaySession
     /// <summary>Sends a client line to the service, tracking requests and remembering the handshake.</summary>
     private async Task ForwardClientLineAsync(byte[] line)
     {
-        JsonRpcPeek.TryRead(line, out var method, out var idRaw, out var isResponse);
-        if (method is not null && idRaw is not null && !isResponse)
+        JsonRpcPeek.TryRead(line, out var method, out var idRaw, out var idKey, out var isResponse);
+        if (method is not null && idRaw is not null && idKey is not null && !isResponse)
         {
-            this.inFlightIds.Add(idRaw);
+            this.inFlightIds[idKey] = idRaw;
             if (method == InitializeMethod && this.initializeLine is null)
             {
                 this.initializeLine = line;
-                this.initializeIdRaw = idRaw;
+                this.initializeIdKey = idKey;
             }
 
             this.logger.LogDebug("Forwarding request {Method} {Id} ({Bytes} bytes)", method, idRaw, line.Length);
@@ -221,24 +240,25 @@ public sealed class RelaySession
             return;
         }
 
-        if (JsonRpcPeek.TryRead(line, out _, out var idRaw, out var isResponse) && isResponse && idRaw is not null)
+        if (JsonRpcPeek.TryRead(line, out _, out _, out var idKey, out var isResponse) && isResponse && idKey is not null)
         {
-            if (this.isReplaying && idRaw == ReplayIdRaw)
+            if (this.isReplaying && idKey == replayIdKey)
             {
                 // The answer to the replayed initialize; the client had its own long ago.
                 await this.CompleteReplayAsync().ConfigureAwait(false);
                 return;
             }
 
-            this.inFlightIds.Remove(idRaw);
+            this.inFlightIds.Remove(idKey);
         }
 
         await this.WriteToClientAsync(line).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Gives up the connection: its calls in flight are answered with <see cref="RelayMessages.ConnectionLost"/> and
-    /// a new connection is attempted. A loss reported for an older connection is ignored.
+    /// Gives up the connection once its reader reached the end, so every line the service sent before it went was
+    /// delivered first: its calls still in flight are answered with <see cref="RelayMessages.ConnectionLost"/> and a
+    /// new connection is attempted. A loss reported for an older connection is ignored.
     /// </summary>
     private async Task OnConnectionLostAsync(int fromConnection)
     {
@@ -251,13 +271,13 @@ public sealed class RelaySession
         await this.CloseConnectionAsync().ConfigureAwait(false);
         var lostIds = this.inFlightIds.ToList();
         this.inFlightIds.Clear();
-        foreach (var idRaw in lostIds)
+        foreach (var (idKey, idRaw) in lostIds)
         {
-            if (idRaw == this.initializeIdRaw)
+            if (idKey == this.initializeIdKey)
             {
                 // The handshake never completed, so there is nothing to replay; the client starts it again.
                 this.initializeLine = null;
-                this.initializeIdRaw = null;
+                this.initializeIdKey = null;
             }
 
             await this.WriteErrorAsync(idRaw, RelayMessages.ConnectionLost).ConfigureAwait(false);
@@ -282,16 +302,21 @@ public sealed class RelaySession
         }
         catch (OperationCanceledException) when (this.sessionToken.IsCancellationRequested)
         {
-            return new ConnectResult(null, ConnectFailure.Unreachable, RelayMessages.ConnectionLost);
+            return new ConnectResult(null, ConnectFailure.Unreachable, this.UnreachableMessage(timeout));
         }
         catch (Exception exception)
         {
             this.logger.LogWarning(exception, "A connection attempt to the memory service failed with an error");
-            result = new ConnectResult(null, ConnectFailure.Unreachable, RelayMessages.ConnectionLost);
+            result = new ConnectResult(null, ConnectFailure.Unreachable, this.UnreachableMessage(timeout));
         }
 
         this.Post(() => this.OnConnectAttemptFinishedAsync(result));
         return result;
+    }
+
+    private string UnreachableMessage(TimeSpan timeout)
+    {
+        return RelayMessages.Unreachable((int)timeout.TotalSeconds, this.logDirectory);
     }
 
     private async Task OnConnectAttemptFinishedAsync(ConnectResult result)
@@ -318,7 +343,7 @@ public sealed class RelaySession
             "Reconnecting to the memory service failed ({Failure}): {Message}",
             result.Failure,
             result.Message);
-        if (result.Failure is ConnectFailure.StoppedOnPurpose or ConnectFailure.SharedModeOff)
+        if (IsAnsweredAtOnce(result.Failure))
         {
             await this.AnswerWaitingRequestsAsync(result.Message).ConfigureAwait(false);
         }
@@ -373,6 +398,7 @@ public sealed class RelaySession
         this.hasConnected = true;
         this.connectionNumber++;
         this.service = stream;
+        this.isServiceWriteFailed = false;
         this.connectionStopping = CancellationTokenSource.CreateLinkedTokenSource(this.sessionToken);
         this.serviceReader = this.ReadServiceAsync(stream, this.connectionNumber, this.connectionStopping.Token);
         this.lastFailure = null;
@@ -441,12 +467,16 @@ public sealed class RelaySession
 
         this.service = null;
         this.isReplaying = false;
+        this.isServiceWriteFailed = false;
         this.connectionNumber++;
         if (this.connectionStopping is { } stopping)
         {
             await stopping.CancelAsync().ConfigureAwait(false);
         }
 
+        // The stream is disposed before the reader is awaited: a stream that ignores cancellation still ends its
+        // pending read when it is disposed, so the relay cannot hang here.
+        await stream.DisposeAsync().ConfigureAwait(false);
         if (this.serviceReader is { } reader)
         {
             await reader.ConfigureAwait(false);
@@ -455,17 +485,20 @@ public sealed class RelaySession
         this.connectionStopping?.Dispose();
         this.connectionStopping = null;
         this.serviceReader = null;
-        await stream.DisposeAsync().ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Writes a line to the service. A failed write does not give up the connection at once: the service may have
+    /// answered earlier calls before it went, and the connection's reader delivers those lines and then reports the
+    /// loss. Until then nothing more is written to the connection; client lines wait for the next one.
+    /// </summary>
     private async Task WriteToServiceAsync(byte[] line)
     {
-        if (this.service is not { } stream)
+        if (this.service is not { } stream || this.isServiceWriteFailed)
         {
             return;
         }
 
-        var writtenTo = this.connectionNumber;
         try
         {
             await stream.WriteAsync(line, this.sessionToken).ConfigureAwait(false);
@@ -474,8 +507,8 @@ public sealed class RelaySession
         }
         catch (Exception exception) when (exception is IOException or ObjectDisposedException)
         {
-            this.logger.LogDebug(exception, "Writing to the memory service failed");
-            await this.OnConnectionLostAsync(writtenTo).ConfigureAwait(false);
+            this.logger.LogDebug(exception, "Writing to the memory service failed; reading what it sent before it went");
+            this.isServiceWriteFailed = true;
         }
     }
 

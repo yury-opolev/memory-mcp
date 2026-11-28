@@ -80,4 +80,54 @@ public sealed class JsonRpcPeekTests
         Assert.Equal("5", idRaw);
         Assert.False(isResponse);
     }
+
+    [Theory]
+    [InlineData("1", "1.0")]
+    [InlineData("1", "1e0")]
+    [InlineData("-25", "-2.50e1")]
+    [InlineData("\"abc\"", "\"a\\" + "u0062c\"")]
+    [InlineData("\"x/y\"", "\"x\\/y\"")]
+    public void IdKey_IsTheSameForEveryEncodingOfOneId(string firstIdRaw, string secondIdRaw)
+    {
+        Assert.True(JsonRpcPeek.TryRead(Encoding.UTF8.GetBytes(Line(firstIdRaw)), out _, out var firstRaw, out var firstKey, out _));
+        Assert.True(JsonRpcPeek.TryRead(Encoding.UTF8.GetBytes(Line(secondIdRaw)), out _, out var secondRaw, out var secondKey, out _));
+
+        Assert.Equal(firstIdRaw, firstRaw);
+        Assert.Equal(secondIdRaw, secondRaw);
+        Assert.NotNull(firstKey);
+        Assert.Equal(firstKey, secondKey);
+    }
+
+    [Theory]
+    [InlineData("1", "\"1\"")]
+    [InlineData("1", "2")]
+    [InlineData("\"a\"", "\"A\"")]
+    public void IdKey_TellsDifferentIdsApart(string firstIdRaw, string secondIdRaw)
+    {
+        JsonRpcPeek.TryRead(Encoding.UTF8.GetBytes(Line(firstIdRaw)), out _, out _, out var firstKey, out _);
+        JsonRpcPeek.TryRead(Encoding.UTF8.GetBytes(Line(secondIdRaw)), out _, out _, out var secondKey, out _);
+
+        Assert.NotEqual(firstKey, secondKey);
+    }
+
+    [Fact]
+    public void DeeplyNestedParams_AreStillRead()
+    {
+        var depth = 500;
+        var nested = new string('[', depth) + new string(']', depth);
+        var line = """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"deep":""" + nested + "}}";
+
+        var isRead = JsonRpcPeek.TryRead(Encoding.UTF8.GetBytes(line), out var method, out var idRaw, out var idKey, out var isResponse);
+
+        Assert.True(isRead);
+        Assert.Equal("tools/call", method);
+        Assert.Equal("5", idRaw);
+        Assert.NotNull(idKey);
+        Assert.False(isResponse);
+    }
+
+    private static string Line(string idRaw)
+    {
+        return """{"jsonrpc":"2.0","id":""" + idRaw + ""","result":{}}""";
+    }
 }
