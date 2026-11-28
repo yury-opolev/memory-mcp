@@ -187,6 +187,8 @@ Client configurations do not change: clients keep starting `bin/MemoryMcp` with 
 
 This publishes the service to `<install root>/service/<yyyyMMdd-HHmmss>/`, writes that path to `<data>/service-path.txt`, registers a launcher that starts `serve` for the data directory at logon and on demand, (re)starts the service on the new version, waits until `status` answers, and then sets `MemoryMcp.Shared.Enabled` in `settings.json` (other keys, such as the encryption setting, are kept). Sessions started from then on are relays; sessions that were already open keep running standalone until they are restarted.
 
+**Switching shared mode on for the first time needs all agent sessions closed**, so that `bin/` can be replaced: a `bin/` built before shared mode cannot act as a relay. If sessions still run from it, the script installs and starts the service anyway, but leaves shared mode switched off in `settings.json` and ends with a warning that shared mode is not in effect yet, with the command to run again once all sessions are closed. Later upgrades do not need sessions closed.
+
 | OS | Launcher registered by the install script | Without it |
 |----|-------------------------------------------|------------|
 | Windows | Scheduled task `MemoryMcp-<hash>`: at logon of the current user, only while logged on, no elevation, no console window (the service copy is built as a GUI-subsystem program) | Detached process |
@@ -195,7 +197,7 @@ This publishes the service to `<install root>/service/<yyyyMMdd-HHmmss>/`, write
 
 `<hash>` is derived from the data directory's full path (`MemoryMcp status --print-hash` prints it), so each data directory has its own service, pipe and launcher. A relay that finds no service running starts it through the registered launcher.
 
-**Upgrades.** While shared mode is on, every install (with or without `--shared`) updates the service: it publishes a new service directory, re-registers the launcher on it, stops the old service, and starts the new one. Open sessions stay open: their relays reconnect and replay the MCP handshake, and a call that was in flight during the restart gets an error to retry. `bin/` is what client configurations point at; it is refreshed only when no open session runs from it, otherwise the script prints `bin is in use by open sessions and was left as is; the service was updated`. Service directories other than the newest two are deleted.
+**Upgrades.** While shared mode is on, every install (with or without `--shared`) updates the service: it publishes a new service directory, re-registers the launcher on it, stops the old service, and starts the new one. Open sessions stay open: their relays reconnect and replay the MCP handshake, and a call that was in flight during the restart gets an error to retry. `bin/` is what client configurations point at; it is refreshed only when no open session runs from it, otherwise the script prints `bin is in use by open sessions and was left as is; the service was updated`. When the `bin/` left in place holds a different build than the one just installed (its `MemoryMcp.dll` differs), the script ends with a warning: sessions started now still run the previous build (standalone, if it predates shared mode) until the install is run again with all agent sessions closed. Service directories other than the newest two are deleted.
 
 **Switch it off:**
 

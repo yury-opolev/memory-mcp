@@ -181,6 +181,29 @@ function Unregister-ServiceTask([string]$taskName) {
     }
 }
 
+# True when bin holds the build this install publishes: its MemoryMcp.dll is identical to a fresh console build's
+# (the service copy cannot be compared directly, as its windowless build differs in the assembly itself).
+function Test-BinMatchesBuild {
+    $binDll = Join-Path $BinDir "MemoryMcp.dll"
+    if (-not (Test-Path -LiteralPath $binDll)) {
+        return $false
+    }
+    $stagingDir = Join-Path $InstallRoot "bin-compare"
+    try {
+        & dotnet publish "$RepoDir\src\MemoryMcp" `
+            --configuration Release `
+            --output "$stagingDir" `
+            --verbosity quiet | Out-Host
+        $stagingDll = Join-Path $stagingDir "MemoryMcp.dll"
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $stagingDll)) {
+            return $false
+        }
+        return (Get-FileHash -LiteralPath $binDll -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $stagingDll -Algorithm SHA256).Hash
+    } finally {
+        Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Publish-Bin {
     if (-not (Test-Path $BinDir)) {
         New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
@@ -289,17 +312,42 @@ function Update-SharedService {
         exit 1
     }
 
-    if ($Shared -eq $true) {
-        Set-SharedEnabled $true
-        Write-Host "  Shared mode enabled in: $SettingsFile" -ForegroundColor Green
-    }
-
+    # bin is left as it is while open sessions run from it; it then may still hold an older build, which keeps
+    # starting standalone servers if it predates shared mode.
+    $isBinOld = $false
     if (Test-DirectoryInUse $BinDir) {
         Write-Host "bin is in use by open sessions and was left as is; the service was updated" -ForegroundColor Yellow
+        $isBinOld = -not (Test-BinMatchesBuild)
     } elseif ((Publish-Bin) -ne 0) {
         Write-Host "  WARNING: Publish to $BinDir failed; the service was updated." -ForegroundColor Yellow
+        $isBinOld = $true
     } else {
         Write-Host "  Published to: $BinDir" -ForegroundColor Green
+    }
+
+    $isSwitchingOn = ($Shared -eq $true) -and -not $WasSharedEnabled
+    if ($isSwitchingOn -and $isBinOld) {
+        # The old bin cannot be a relay, so shared mode is not switched on in settings.json: no session would be shared.
+        $script:FinalWarning = @(
+            "Shared mode is NOT in effect yet: the memory service is installed and running, but bin was not updated",
+            "because open agent sessions are using it. Sessions started now still run the previous build in bin, which",
+            "runs standalone against the same database, and shared mode was not switched on in settings.json.",
+            "Close all agent sessions, then run:",
+            "  & `"$PSCommandPath`" -Shared `$true"
+        )
+    } else {
+        if ($Shared -eq $true) {
+            Set-SharedEnabled $true
+            Write-Host "  Shared mode enabled in: $SettingsFile" -ForegroundColor Green
+        }
+        if ($isBinOld) {
+            $script:FinalWarning = @(
+                "bin was not updated because open agent sessions are using it. Sessions started now still run the",
+                "previous build in bin; if that build predates shared mode, they run standalone against the same database.",
+                "Close all agent sessions, then run:",
+                "  & `"$PSCommandPath`""
+            )
+        }
     }
 
     foreach ($oldDirectory in (Get-ServiceDirectories | Select-Object -Skip 2)) {
@@ -312,7 +360,9 @@ function Update-SharedService {
     }
 }
 
-$SharedOn = if ($null -ne $Shared) { [bool]$Shared } else { Get-SharedEnabled }
+$WasSharedEnabled = Get-SharedEnabled
+$SharedOn = if ($null -ne $Shared) { [bool]$Shared } else { $WasSharedEnabled }
+$FinalWarning = $null
 
 Write-Host "=== memory-mcp install ===" -ForegroundColor Cyan
 Write-Host ""
@@ -498,3 +548,11 @@ Write-Host "Data     : $DataDir" -ForegroundColor Green
 Write-Host "Settings : $SettingsFile" -ForegroundColor Green
 Write-Host ""
 Write-Host "Make sure Ollama is running (ollama serve) before using the MCP server."
+
+if ($FinalWarning) {
+    Write-Host ""
+    Write-Host "=== WARNING ===" -ForegroundColor Red
+    foreach ($line in $FinalWarning) {
+        Write-Host $line -ForegroundColor Red
+    }
+}

@@ -376,17 +376,39 @@ update_shared_service() {
         exit 1
     fi
 
-    if [ "$SHARED" = "true" ]; then
-        settings_set_bool Shared true
-        echo "  Shared mode enabled in: $SETTINGS_FILE"
-    fi
-
+    # bin is left as it is while open sessions run from it; it then may still hold an older build, which keeps
+    # starting standalone servers if it predates shared mode.
+    local is_bin_old=false
     if directory_in_use "$BIN_DIR"; then
         echo "bin is in use by open sessions and was left as is; the service was updated"
+        if ! cmp -s "$BIN_DIR/MemoryMcp.dll" "$service_dir/MemoryMcp.dll"; then
+            is_bin_old=true
+        fi
     elif publish_bin; then
         echo "  Published to: $BIN_DIR"
     else
         echo "  WARNING: Publish to $BIN_DIR failed; the service was updated."
+        is_bin_old=true
+    fi
+
+    if [ "$SHARED" = "true" ] && [ "$WAS_SHARED_ENABLED" != "true" ] && [ "$is_bin_old" = true ]; then
+        # The old bin cannot be a relay, so shared mode is not switched on in settings.json: no session would be shared.
+        FINAL_WARNING="Shared mode is NOT in effect yet: the memory service is installed and running, but bin was not updated
+because open agent sessions are using it. Sessions started now still run the previous build in bin, which
+runs standalone against the same database, and shared mode was not switched on in settings.json.
+Close all agent sessions, then run:
+  bash \"$SCRIPT_DIR/install.sh\" --shared true"
+    else
+        if [ "$SHARED" = "true" ]; then
+            settings_set_bool Shared true
+            echo "  Shared mode enabled in: $SETTINGS_FILE"
+        fi
+        if [ "$is_bin_old" = true ]; then
+            FINAL_WARNING="bin was not updated because open agent sessions are using it. Sessions started now still run the
+previous build in bin; if that build predates shared mode, they run standalone against the same database.
+Close all agent sessions, then run:
+  bash \"$SCRIPT_DIR/install.sh\""
+        fi
     fi
 
     while IFS= read -r old_directory; do
@@ -403,11 +425,13 @@ if [ -n "$SHARED" ] && ! json_tool_available; then
     exit 1
 fi
 
+WAS_SHARED_ENABLED="$(settings_shared_enabled)"
 if [ -n "$SHARED" ]; then
     SHARED_ON="$SHARED"
 else
-    SHARED_ON="$(settings_shared_enabled)"
+    SHARED_ON="$WAS_SHARED_ENABLED"
 fi
+FINAL_WARNING=""
 
 echo "=== memory-mcp install ==="
 echo ""
@@ -576,3 +600,9 @@ echo "Data     : $DATA_DIR"
 echo "Settings : $SETTINGS_FILE"
 echo ""
 echo "Make sure Ollama is running (ollama serve) before using the MCP server."
+
+if [ -n "$FINAL_WARNING" ]; then
+    echo ""
+    echo "=== WARNING ==="
+    printf '%s\n' "$FINAL_WARNING"
+fi
